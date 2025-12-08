@@ -64,29 +64,18 @@ ${BOLD}Logs:${RESET}
   tail [type]         Shortcut for logs tail
 EOF
 
-    # Framework-specific commands
-    if [[ -n "$framework" ]]; then
-        cat <<EOF
+    cat <<EOF
 
-${BOLD}Project Commands ($(get_framework_display_name "$framework")):${RESET}
-  serve               Start development server
+${BOLD}Development:${RESET}
+  serve [options]     Start development server (auto-detect framework)
+                      --host HOST   Bind to host (default: 0.0.0.0)
+                      --port PORT   Listen on port (default: 8000)
+                      --dir DIR     Document root (default: auto-detect)
+                      --octane      Use Laravel Octane (Laravel only)
+                      Shorthand: 8080, :8080, 10.0.0.1:8080
   worker              Manage queue workers (Supervisor)
   cron                Manage scheduled tasks (Crontab)
 EOF
-        case "$framework" in
-            laravel)
-                echo "  artisan [cmd]       Run artisan command"
-                has_horizon 2>/dev/null && echo "  horizon             Start Laravel Horizon"
-                has_octane 2>/dev/null && echo "  octane [cmd]        Run Laravel Octane"
-                ;;
-            symfony)
-                echo "  console [cmd]       Run console command"
-                ;;
-            yii)
-                echo "  yii [cmd]           Run yii command"
-                ;;
-        esac
-    fi
 
     cat <<EOF
 
@@ -106,8 +95,8 @@ ${BOLD}Composer:${RESET}
 ${BOLD}Version Resolution Order:${RESET}
   1. PHPVERSION_USE environment variable (session)
   2. .phpversion file (local, searches up from current directory)
-  3. ~/.phpversion/config (user default)
-  4. /etc/phpversion (system default)
+  3. ~/.phpvm/version (user default)
+  4. /etc/phpvm/version (system default)
   5. First installed version (fallback)
 
 ${BOLD}Examples:${RESET}
@@ -115,15 +104,12 @@ ${BOLD}Examples:${RESET}
   php install 8.3          # Install PHP 8.3
   php install extension    # Install extension (fuzzy search)
   php menu                 # Open interactive dashboard
-  php serve                # Start dev server (in project)
-  php worker               # Manage queue workers (in project)
-  php nginx                # Interactive nginx menu / config info
-  php nginx generate       # Generate nginx config with wizard
-  php nginx processes      # Show running backends (Octane, etc.)
+  php serve                # Start dev server (auto-detect framework)
+  php serve 8080           # Start on port 8080 (localhost)
+  php serve :3000          # Start on port 3000 (all interfaces)
+  php serve --octane       # Start with Laravel Octane
   php logs                 # Interactive log viewer
-  php logs split           # Split-screen dual log viewer
   php tail app             # Follow application log
-  php logs search "error"  # Search logs with ripgrep
   echo "8.4" > .phpversion # Set project PHP version
 
 ${BOLD}Tab Completion:${RESET}

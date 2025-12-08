@@ -7,7 +7,7 @@ set -o pipefail
 
 # === config.sh ===
 
-PHPVM_VERSION="1.1.0"
+PHPVM_VERSION="1.2.0"
 PHPVM_REPO="professor93/phpvm"
 PHPVM_GITHUB_API="https://api.github.com/repos/${PHPVM_REPO}/releases/latest"
 PHPVM_RAW_URL="https://raw.githubusercontent.com/${PHPVM_REPO}/main"
@@ -20,9 +20,9 @@ PHPVM_ENV_FILE="/etc/profile.d/phpvm.sh"
 PHPVM_BIN_DIR_USER="$HOME/.local/bin"
 PHPVM_ENV_FILE_USER="$HOME/.config/phpvm/env.sh"
 
-PHPVM_DIR="$HOME/.phpversion"
-PHPVM_CONFIG="$PHPVM_DIR/config"
-SYSTEM_CONFIG="/etc/phpversion"
+PHPVM_DIR="$HOME/.phpvm"
+PHPVM_CONFIG="$PHPVM_DIR/version"
+SYSTEM_CONFIG="/etc/phpvm/version"
 
 SUPPORTED_VERSIONS=("8.5" "8.4" "8.3" "8.2" "8.1" "8.0" "7.4" "7.3" "7.2" "7.1" "7.0" "5.6")
 
@@ -31,7 +31,7 @@ DEFAULT_EXTENSIONS=(
 )
 
 LOG_TIMESTAMPS=true  # Enable timestamps in verbose/log output
-LOG_FILE="$HOME/.phpversion/phpvm.log"
+LOG_FILE="$HOME/.phpvm/phpvm.log"
 
 # === colors.sh ===
 
@@ -591,6 +591,20 @@ print_header() {
 
     if [[ -n "$current_version" ]]; then
         status_text="Current: PHP ${current_version}"
+
+        # Add framework info if in a framework project
+        local framework
+        framework=$(detect_framework 2>/dev/null)
+        if [[ -n "$framework" ]]; then
+            local fw_name fw_version
+            fw_name=$(get_framework_display_name "$framework")
+            fw_version=$(get_framework_version "$framework" 2>/dev/null)
+            if [[ -n "$fw_version" ]]; then
+                status_text="${status_text} | ${fw_name} v${fw_version}"
+            else
+                status_text="${status_text} | ${fw_name}"
+            fi
+        fi
     else
         status_text="No PHP installed"
     fi
@@ -780,7 +794,15 @@ gum_spin() {
     local title="$1"
     shift
 
-    if [[ "$UI_MODE" == "gum" ]]; then
+    # Check if the first argument is a shell function
+    # gum spin runs commands in a subprocess which can't access shell functions
+    local cmd="$1"
+    local is_function=false
+    if [[ "$(type -t "$cmd" 2>/dev/null)" == "function" ]]; then
+        is_function=true
+    fi
+
+    if [[ "$UI_MODE" == "gum" && "$is_function" == "false" ]]; then
         gum spin --spinner dot --title "$title" -- "$@"
     else
         echo "${CYAN}${title}...${RESET}"
@@ -985,10 +1007,10 @@ get_current_version() {
     # 2. .phpversion file (local - searches up from $PWD)
     elif local file; file=$(find_phpversion_file) 2>/dev/null; then
         version=$(cat "$file" 2>/dev/null | tr -d '[:space:]')
-    # 3. ~/.phpversion/config (user default)
+    # 3. ~/.phpvm/version (user default)
     elif [[ -f "$PHPVM_CONFIG" ]]; then
         version=$(cat "$PHPVM_CONFIG" 2>/dev/null | tr -d '[:space:]')
-    # 4. /etc/phpversion (system default)
+    # 4. /etc/phpvm/version (system default)
     elif [[ -f "$SYSTEM_CONFIG" ]]; then
         version=$(cat "$SYSTEM_CONFIG" 2>/dev/null | tr -d '[:space:]')
     # 5. First installed version (fallback)
@@ -1032,15 +1054,15 @@ get_version_source() {
         return
     fi
 
-    # 3. ~/.phpversion/config (user default)
+    # 3. ~/.phpvm/version (user default)
     if [[ -f "$PHPVM_CONFIG" ]]; then
-        echo "user (~/.phpversion/config)"
+        echo "user (~/.phpvm/version)"
         return
     fi
 
-    # 4. /etc/phpversion (system default)
+    # 4. /etc/phpvm/version (system default)
     if [[ -f "$SYSTEM_CONFIG" ]]; then
-        echo "system (/etc/phpversion)"
+        echo "system (/etc/phpvm/version)"
         return
     fi
 

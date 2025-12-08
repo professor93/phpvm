@@ -7,9 +7,9 @@
 export __PHPVM_LOADED=1
 
 # Configuration
-PHPVM_DIR="$HOME/.phpversion"
-PHPVM_CONFIG="$PHPVM_DIR/config"
-SYSTEM_CONFIG="/etc/phpversion"
+PHPVM_DIR="$HOME/.phpvm"
+PHPVM_CONFIG="$PHPVM_DIR/version"
+SYSTEM_CONFIG="/etc/phpvm/version"
 
 # Get current PHP version (mirrors version.sh logic)
 __phpvm_get_version() {
@@ -56,7 +56,7 @@ __phpvm_update_path() {
     version=$(__phpvm_get_version)
 
     # Remove old phpvm paths from PATH
-    PATH=$(echo "$PATH" | tr ':' '\n' | grep -v "\.phpversion/.*/composer/vendor/bin" | tr '\n' ':' | sed 's/:$//')
+    PATH=$(echo "$PATH" | tr ':' '\n' | grep -v "\.phpvm/.*/composer/vendor/bin" | tr '\n' ':' | sed 's/:$//')
 
     # Add new path if version set
     if [[ -n "$version" && -d "$PHPVM_DIR/$version/composer/vendor/bin" ]]; then

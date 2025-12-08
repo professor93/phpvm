@@ -1,240 +1,230 @@
 # serve.sh - Development Server Management
 # PHP Version Manager (PHPVM)
 
-# Serve command
+# Serve command - smart argument parsing
+# Usage: php serve [host:port | :port | port | args...]
+#
+# Smart parsing:
+#   php serve 8080           -> --port=8080 --host=127.0.0.1
+#   php serve :8080          -> --port=8080 --host=0.0.0.0
+#   php serve 10.0.0.1:8080  -> --port=8080 --host=10.0.0.1
+#   php serve --port 8080    -> passed directly to framework
+#
+# Laravel Octane:
+#   php serve --octane       -> php artisan octane:start
+#   php serve --octane 8080  -> php artisan octane:start --port=8080
+#
+# Framework detection:
+#   Laravel:  php artisan serve [args...]
+#   Symfony:  php bin/console server:start [args...]
+#   Yii:      php yii serve [args...]
+#   Other:    php -S host:port -t docroot
 cmd_serve() {
-    local framework
-    framework=$(detect_framework)
-
-    if [[ -z "$framework" ]]; then
-        error "Not in a PHP framework project directory"
-        echo "Supported: Laravel, Symfony, Yii2"
-        return 1
-    fi
-
     local php_bin
     php_bin=$(get_php_binary)
 
-    case "$framework" in
-        laravel)  serve_laravel "$php_bin" ;;
-        symfony)  serve_symfony "$php_bin" ;;
-        yii)      serve_yii "$php_bin" ;;
-    esac
-}
+    local framework
+    framework=$(detect_framework)
 
-# Laravel serve options
-serve_laravel() {
-    local php_bin="$1"
+    # Check for --octane flag (Laravel only)
+    local use_octane=false
+    local remaining_args=()
 
-    local options=("artisan serve (built-in)")
+    for arg in "$@"; do
+        if [[ "$arg" == "--octane" ]]; then
+            use_octane=true
+        else
+            remaining_args+=("$arg")
+        fi
+    done
 
-    if has_octane; then
-        options+=("Octane (Swoole/RoadRunner)")
+    set -- "${remaining_args[@]}"
+
+    # Parse shorthand arguments
+    local args=()
+    local host=""
+    local port=""
+
+    if [[ $# -gt 0 ]]; then
+        local first_arg="$1"
+
+        # Check if first arg is shorthand format
+        if [[ "$first_arg" =~ ^:([0-9]+)$ ]]; then
+            # :8080 format -> host=0.0.0.0, port=8080
+            host="0.0.0.0"
+            port="${BASH_REMATCH[1]}"
+            shift
+        elif [[ "$first_arg" =~ ^([0-9]+)$ ]]; then
+            # 8080 format -> host=127.0.0.1, port=8080
+            host="127.0.0.1"
+            port="${BASH_REMATCH[1]}"
+            shift
+        elif [[ "$first_arg" =~ ^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)$ ]]; then
+            # 10.0.0.1:8080 format
+            host="${BASH_REMATCH[1]}"
+            port="${BASH_REMATCH[2]}"
+            shift
+        elif [[ "$first_arg" =~ ^([a-zA-Z0-9.-]+):([0-9]+)$ ]]; then
+            # hostname:8080 format (e.g., localhost:8080)
+            host="${BASH_REMATCH[1]}"
+            port="${BASH_REMATCH[2]}"
+            shift
+        fi
     fi
 
-    options+=("PHP built-in server")
+    # Handle Laravel Octane
+    if [[ "$use_octane" == "true" ]]; then
+        if [[ "$framework" != "laravel" ]]; then
+            error "Octane is only available for Laravel projects"
+            return 1
+        fi
+        serve_octane "$php_bin" "$host" "$port" "$@"
+        return
+    fi
 
-    local choice
-    choice=$(gum_menu "Select server for Laravel:" "${options[@]}")
+    # Build framework-specific arguments
+    if [[ -n "$host" && -n "$port" ]]; then
+        case "$framework" in
+            laravel)
+                args=("--host=$host" "--port=$port")
+                ;;
+            symfony)
+                args=("$host:$port")
+                ;;
+            yii)
+                args=("$host:$port")
+                ;;
+            *)
+                # Non-framework: handled in serve_builtin
+                args=("--host" "$host" "--port" "$port")
+                ;;
+        esac
+    fi
 
-    case "$choice" in
-        "artisan serve"*)
-            serve_artisan "$php_bin"
+    # Add remaining arguments
+    args+=("$@")
+
+    case "$framework" in
+        laravel)
+            serve_laravel "$php_bin" "${args[@]}"
             ;;
-        "Octane"*)
-            serve_octane "$php_bin"
+        symfony)
+            serve_symfony "$php_bin" "${args[@]}"
             ;;
-        "PHP built-in"*)
-            serve_builtin "$php_bin" "public"
+        yii)
+            serve_yii "$php_bin" "${args[@]}"
             ;;
         *)
-            msg "Cancelled"
-            ;;
-    esac
-}
-
-# Symfony serve options
-serve_symfony() {
-    local php_bin="$1"
-
-    local choice
-    choice=$(gum_menu "Select server for Symfony:" \
-        "bin/console server:start" \
-        "symfony serve (if installed)" \
-        "PHP built-in server")
-
-    case "$choice" in
-        "bin/console"*)
-            serve_symfony_console "$php_bin"
-            ;;
-        "symfony serve"*)
-            serve_symfony_cli
-            ;;
-        "PHP built-in"*)
-            serve_builtin "$php_bin" "public"
-            ;;
-        *)
-            msg "Cancelled"
-            ;;
-    esac
-}
-
-# Yii serve options
-serve_yii() {
-    local php_bin="$1"
-
-    local choice
-    choice=$(gum_menu "Select server for Yii2:" \
-        "yii serve (built-in)" \
-        "PHP built-in server")
-
-    case "$choice" in
-        "yii serve"*)
-            serve_yii_builtin "$php_bin"
-            ;;
-        "PHP built-in"*)
-            serve_builtin "$php_bin" "web"
-            ;;
-        *)
-            msg "Cancelled"
+            serve_builtin "$php_bin" "${args[@]}"
             ;;
     esac
 }
 
 # Laravel artisan serve
-serve_artisan() {
+serve_laravel() {
     local php_bin="$1"
-
-    local host
-    host=$(gum_input "Host:" "127.0.0.1")
-
-    local port
-    port=$(gum_input "Port:" "8000")
+    shift
 
     echo ""
     info_log "Starting Laravel development server..."
-    echo "${CYAN}http://${host}:${port}${RESET}"
     echo "${DIM}Press Ctrl+C to stop${RESET}"
     echo ""
 
-    "$php_bin" artisan serve --host="$host" --port="$port"
+    "$php_bin" artisan serve "$@"
 }
 
 # Laravel Octane serve
 serve_octane() {
     local php_bin="$1"
+    local host="$2"
+    local port="$3"
+    shift 3
 
-    local server
-    server=$(gum_menu "Octane server:" \
-        "Swoole" \
-        "RoadRunner" \
-        "FrankenPHP")
-
-    local host
-    host=$(gum_input "Host:" "127.0.0.1")
-
-    local port
-    port=$(gum_input "Port:" "8000")
-
-    local workers
-    workers=$(gum_input "Workers:" "auto")
-
-    echo ""
-    info_log "Starting Laravel Octane (${server})..."
-    echo "${CYAN}http://${host}:${port}${RESET}"
-    echo "${DIM}Press Ctrl+C to stop${RESET}"
-    echo ""
-
-    local server_option
-    case "$server" in
-        "Swoole")      server_option="--server=swoole" ;;
-        "RoadRunner")  server_option="--server=roadrunner" ;;
-        "FrankenPHP")  server_option="--server=frankenphp" ;;
-    esac
-
-    "$php_bin" artisan octane:start $server_option --host="$host" --port="$port" --workers="$workers"
-}
-
-# Symfony console server
-serve_symfony_console() {
-    local php_bin="$1"
-
-    local host
-    host=$(gum_input "Host:" "127.0.0.1")
-
-    local port
-    port=$(gum_input "Port:" "8000")
-
-    echo ""
-    info_log "Starting Symfony development server..."
-    echo "${CYAN}http://${host}:${port}${RESET}"
-    echo "${DIM}Press Ctrl+C to stop${RESET}"
-    echo ""
-
-    "$php_bin" bin/console server:start "${host}:${port}"
-}
-
-# Symfony CLI serve
-serve_symfony_cli() {
-    if ! command_exists symfony; then
-        error "Symfony CLI is not installed"
-        echo "Install: https://symfony.com/download"
+    # Check if Octane is installed
+    if ! grep -q '"laravel/octane"' composer.json 2>/dev/null; then
+        error "Laravel Octane is not installed"
+        echo "Install with: composer require laravel/octane"
         return 1
     fi
 
-    local port
-    port=$(gum_input "Port:" "8000")
+    # Build octane arguments
+    local octane_args=()
+    [[ -n "$host" ]] && octane_args+=("--host=$host")
+    [[ -n "$port" ]] && octane_args+=("--port=$port")
+    octane_args+=("$@")
 
     echo ""
-    info_log "Starting Symfony local server..."
+    info_log "Starting Laravel Octane..."
     echo "${DIM}Press Ctrl+C to stop${RESET}"
     echo ""
 
-    symfony serve --port="$port"
+    "$php_bin" artisan octane:start "${octane_args[@]}"
 }
 
-# Yii built-in serve
-serve_yii_builtin() {
+# Symfony console server
+serve_symfony() {
     local php_bin="$1"
+    shift
 
-    local host
-    host=$(gum_input "Host:" "localhost")
+    echo ""
+    info_log "Starting Symfony development server..."
+    echo "${DIM}Press Ctrl+C to stop${RESET}"
+    echo ""
 
-    local port
-    port=$(gum_input "Port:" "8080")
+    "$php_bin" bin/console server:start "$@"
+}
+
+# Yii serve
+serve_yii() {
+    local php_bin="$1"
+    shift
 
     echo ""
     info_log "Starting Yii2 development server..."
-    echo "${CYAN}http://${host}:${port}${RESET}"
     echo "${DIM}Press Ctrl+C to stop${RESET}"
     echo ""
 
-    "$php_bin" yii serve "$host:$port"
+    "$php_bin" yii serve "$@"
 }
 
-# PHP built-in server
+# PHP built-in server (non-framework)
 serve_builtin() {
     local php_bin="$1"
-    local docroot="${2:-public}"
+    shift
 
-    local host
-    host=$(gum_input "Host:" "127.0.0.1")
+    local host="0.0.0.0"
+    local port="8000"
+    local docroot="."
 
-    local port
-    port=$(gum_input "Port:" "8000")
+    # Parse options
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --host|-h)
+                host="$2"
+                shift 2
+                ;;
+            --port|-p)
+                port="$2"
+                shift 2
+                ;;
+            --dir|-d|-t)
+                docroot="$2"
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
 
-    # Check if docroot exists
-    if [[ ! -d "$docroot" ]]; then
-        local available_dirs=()
-        [[ -d "public" ]] && available_dirs+=("public")
-        [[ -d "web" ]] && available_dirs+=("web")
-        [[ -d "www" ]] && available_dirs+=("www")
-        available_dirs+=("." "Custom path")
-
-        docroot=$(gum_menu "Document root:" "${available_dirs[@]}")
-
-        if [[ "$docroot" == "Custom path" ]]; then
-            docroot=$(gum_input "Document root path:" ".")
+    # Auto-detect document root
+    if [[ "$docroot" == "." ]]; then
+        if [[ -d "public" ]]; then
+            docroot="public"
+        elif [[ -d "web" ]]; then
+            docroot="web"
+        elif [[ -d "www" ]]; then
+            docroot="www"
         fi
     fi
 

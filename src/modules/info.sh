@@ -104,13 +104,13 @@ cmd_info() {
         local user_version
         user_version=$(cat "$PHPVM_CONFIG" 2>/dev/null | tr -d '[:space:]')
         if [[ "$active_found" == "false" ]]; then
-            echo "  ${GREEN}[x]${RESET} 3. User (~/.phpversion/config = ${user_version})"
+            echo "  ${GREEN}[x]${RESET} 3. User (~/.phpvm/version = ${user_version})"
             active_found=true
         else
-            echo "  ${DIM}[ ] 3. User (~/.phpversion/config = ${user_version})${RESET}"
+            echo "  ${DIM}[ ] 3. User (~/.phpvm/version = ${user_version})${RESET}"
         fi
     else
-        echo "  ${DIM}[ ] 3. User (~/.phpversion/config not set)${RESET}"
+        echo "  ${DIM}[ ] 3. User (~/.phpvm/version not set)${RESET}"
     fi
 
     # 4. System
@@ -118,13 +118,13 @@ cmd_info() {
         local system_version
         system_version=$(cat "$SYSTEM_CONFIG" 2>/dev/null | tr -d '[:space:]')
         if [[ "$active_found" == "false" ]]; then
-            echo "  ${GREEN}[x]${RESET} 4. System (/etc/phpversion = ${system_version})"
+            echo "  ${GREEN}[x]${RESET} 4. System (/etc/phpvm/version = ${system_version})"
             active_found=true
         else
-            echo "  ${DIM}[ ] 4. System (/etc/phpversion = ${system_version})${RESET}"
+            echo "  ${DIM}[ ] 4. System (/etc/phpvm/version = ${system_version})${RESET}"
         fi
     else
-        echo "  ${DIM}[ ] 4. System (/etc/phpversion not set)${RESET}"
+        echo "  ${DIM}[ ] 4. System (/etc/phpvm/version not set)${RESET}"
     fi
 
     # 5. Fallback

@@ -142,3 +142,26 @@ get_framework_display_name() {
         *)        echo "PHP" ;;
     esac
 }
+
+# Get framework version from composer.lock
+get_framework_version() {
+    local framework="${1:-$(detect_framework)}"
+    local dir="${2:-$PWD}"
+    local lock_file="$dir/composer.lock"
+
+    [[ ! -f "$lock_file" ]] && return
+
+    local package_name
+    case "$framework" in
+        laravel)  package_name="laravel/framework" ;;
+        symfony)  package_name="symfony/framework-bundle" ;;
+        yii)      package_name="yiisoft/yii2" ;;
+        *)        return ;;
+    esac
+
+    # Extract version from composer.lock
+    grep -A5 "\"name\": \"$package_name\"" "$lock_file" 2>/dev/null | \
+        grep '"version"' | head -1 | \
+        sed 's/.*"version"[^"]*"\([^"]*\)".*/\1/' | \
+        sed 's/^v//'
+}

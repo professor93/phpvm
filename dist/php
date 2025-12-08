@@ -1,5 +1,5 @@
 #!/bin/bash
-# PHP Version Manager (PHPVM) v1.1.0
+# PHP Version Manager (PHPVM) v1.2.0
 # https://github.com/professor93/phpvm
 # This file is auto-generated. Do not edit directly.
 
@@ -7,7 +7,7 @@ set -o pipefail
 
 # === config.sh ===
 
-PHPVM_VERSION="1.1.0"
+PHPVM_VERSION="1.2.0"
 PHPVM_REPO="professor93/phpvm"
 PHPVM_GITHUB_API="https://api.github.com/repos/${PHPVM_REPO}/releases/latest"
 PHPVM_RAW_URL="https://raw.githubusercontent.com/${PHPVM_REPO}/main"
@@ -20,9 +20,9 @@ PHPVM_ENV_FILE="/etc/profile.d/phpvm.sh"
 PHPVM_BIN_DIR_USER="$HOME/.local/bin"
 PHPVM_ENV_FILE_USER="$HOME/.config/phpvm/env.sh"
 
-PHPVM_DIR="$HOME/.phpversion"
-PHPVM_CONFIG="$PHPVM_DIR/config"
-SYSTEM_CONFIG="/etc/phpversion"
+PHPVM_DIR="$HOME/.phpvm"
+PHPVM_CONFIG="$PHPVM_DIR/version"
+SYSTEM_CONFIG="/etc/phpvm/version"
 
 SUPPORTED_VERSIONS=("8.5" "8.4" "8.3" "8.2" "8.1" "8.0" "7.4" "7.3" "7.2" "7.1" "7.0" "5.6")
 
@@ -31,7 +31,7 @@ DEFAULT_EXTENSIONS=(
 )
 
 LOG_TIMESTAMPS=true  # Enable timestamps in verbose/log output
-LOG_FILE="$HOME/.phpversion/phpvm.log"
+LOG_FILE="$HOME/.phpvm/phpvm.log"
 
 # === colors.sh ===
 
@@ -591,6 +591,20 @@ print_header() {
 
     if [[ -n "$current_version" ]]; then
         status_text="Current: PHP ${current_version}"
+
+        # Add framework info if in a framework project
+        local framework
+        framework=$(detect_framework 2>/dev/null)
+        if [[ -n "$framework" ]]; then
+            local fw_name fw_version
+            fw_name=$(get_framework_display_name "$framework")
+            fw_version=$(get_framework_version "$framework" 2>/dev/null)
+            if [[ -n "$fw_version" ]]; then
+                status_text="${status_text} | ${fw_name} v${fw_version}"
+            else
+                status_text="${status_text} | ${fw_name}"
+            fi
+        fi
     else
         status_text="No PHP installed"
     fi
@@ -780,7 +794,15 @@ gum_spin() {
     local title="$1"
     shift
 
-    if [[ "$UI_MODE" == "gum" ]]; then
+    # Check if the first argument is a shell function
+    # gum spin runs commands in a subprocess which can't access shell functions
+    local cmd="$1"
+    local is_function=false
+    if [[ "$(type -t "$cmd" 2>/dev/null)" == "function" ]]; then
+        is_function=true
+    fi
+
+    if [[ "$UI_MODE" == "gum" && "$is_function" == "false" ]]; then
         gum spin --spinner dot --title "$title" -- "$@"
     else
         echo "${CYAN}${title}...${RESET}"
@@ -985,10 +1007,10 @@ get_current_version() {
     # 2. .phpversion file (local - searches up from $PWD)
     elif local file; file=$(find_phpversion_file) 2>/dev/null; then
         version=$(cat "$file" 2>/dev/null | tr -d '[:space:]')
-    # 3. ~/.phpversion/config (user default)
+    # 3. ~/.phpvm/version (user default)
     elif [[ -f "$PHPVM_CONFIG" ]]; then
         version=$(cat "$PHPVM_CONFIG" 2>/dev/null | tr -d '[:space:]')
-    # 4. /etc/phpversion (system default)
+    # 4. /etc/phpvm/version (system default)
     elif [[ -f "$SYSTEM_CONFIG" ]]; then
         version=$(cat "$SYSTEM_CONFIG" 2>/dev/null | tr -d '[:space:]')
     # 5. First installed version (fallback)
@@ -1032,15 +1054,15 @@ get_version_source() {
         return
     fi
 
-    # 3. ~/.phpversion/config (user default)
+    # 3. ~/.phpvm/version (user default)
     if [[ -f "$PHPVM_CONFIG" ]]; then
-        echo "user (~/.phpversion/config)"
+        echo "user (~/.phpvm/version)"
         return
     fi
 
-    # 4. /etc/phpversion (system default)
+    # 4. /etc/phpvm/version (system default)
     if [[ -f "$SYSTEM_CONFIG" ]]; then
-        echo "system (/etc/phpversion)"
+        echo "system (/etc/phpvm/version)"
         return
     fi
 
@@ -1203,6 +1225,28 @@ get_framework_display_name() {
         yii)      echo "Yii2" ;;
         *)        echo "PHP" ;;
     esac
+}
+
+get_framework_version() {
+    local framework="${1:-$(detect_framework)}"
+    local dir="${2:-$PWD}"
+    local lock_file="$dir/composer.lock"
+
+    [[ ! -f "$lock_file" ]] && return
+
+    local package_name
+    case "$framework" in
+        laravel)  package_name="laravel/framework" ;;
+        symfony)  package_name="symfony/framework-bundle" ;;
+        yii)      package_name="yiisoft/yii2" ;;
+        *)        return ;;
+    esac
+
+    # Extract version from composer.lock
+    grep -A5 "\"name\": \"$package_name\"" "$lock_file" 2>/dev/null | \
+        grep '"version"' | head -1 | \
+        sed 's/.*"version"[^"]*"\([^"]*\)".*/\1/' | \
+        sed 's/^v//'
 }
 
 # === install.sh ===
@@ -1747,7 +1791,7 @@ set_user_version() {
     mkdir -p "$PHPVM_DIR"
     echo "$version" > "$PHPVM_CONFIG"
     success "PHP $version set as user default"
-    info_log "Updated ~/.phpversion/config"
+    info_log "Updated ~/.phpvm/version"
 }
 
 set_system_version() {
@@ -1757,7 +1801,7 @@ set_system_version() {
 
     run_privileged tee "$SYSTEM_CONFIG" > /dev/null <<< "$version"
     success "PHP $version set as system-wide default"
-    info_log "Updated /etc/phpversion"
+    info_log "Updated /etc/phpvm/version"
 }
 
 # === list.sh ===
@@ -1948,13 +1992,13 @@ cmd_info() {
         local user_version
         user_version=$(cat "$PHPVM_CONFIG" 2>/dev/null | tr -d '[:space:]')
         if [[ "$active_found" == "false" ]]; then
-            echo "  ${GREEN}[x]${RESET} 3. User (~/.phpversion/config = ${user_version})"
+            echo "  ${GREEN}[x]${RESET} 3. User (~/.phpvm/version = ${user_version})"
             active_found=true
         else
-            echo "  ${DIM}[ ] 3. User (~/.phpversion/config = ${user_version})${RESET}"
+            echo "  ${DIM}[ ] 3. User (~/.phpvm/version = ${user_version})${RESET}"
         fi
     else
-        echo "  ${DIM}[ ] 3. User (~/.phpversion/config not set)${RESET}"
+        echo "  ${DIM}[ ] 3. User (~/.phpvm/version not set)${RESET}"
     fi
 
     # 4. System
@@ -1962,13 +2006,13 @@ cmd_info() {
         local system_version
         system_version=$(cat "$SYSTEM_CONFIG" 2>/dev/null | tr -d '[:space:]')
         if [[ "$active_found" == "false" ]]; then
-            echo "  ${GREEN}[x]${RESET} 4. System (/etc/phpversion = ${system_version})"
+            echo "  ${GREEN}[x]${RESET} 4. System (/etc/phpvm/version = ${system_version})"
             active_found=true
         else
-            echo "  ${DIM}[ ] 4. System (/etc/phpversion = ${system_version})${RESET}"
+            echo "  ${DIM}[ ] 4. System (/etc/phpvm/version = ${system_version})${RESET}"
         fi
     else
-        echo "  ${DIM}[ ] 4. System (/etc/phpversion not set)${RESET}"
+        echo "  ${DIM}[ ] 4. System (/etc/phpvm/version not set)${RESET}"
     fi
 
     # 5. Fallback
@@ -2199,11 +2243,29 @@ fpm_service_control() {
         "Status")
 
     case "$action" in
-        "Start")   run_privileged systemctl start "$service" && success "Started $service" ;;
-        "Stop")    run_privileged systemctl stop "$service" && success "Stopped $service" ;;
-        "Restart") run_privileged systemctl restart "$service" && success "Restarted $service" ;;
-        "Reload")  run_privileged systemctl reload "$service" && success "Reloaded $service" ;;
-        "Status")  systemctl status "$service" ;;
+        "Start")
+            if gum_confirm "Start $service?"; then
+                run_privileged systemctl start "$service" && success "Started $service"
+            fi
+            ;;
+        "Stop")
+            if gum_confirm "Stop $service?" "no"; then
+                run_privileged systemctl stop "$service" && success "Stopped $service"
+            fi
+            ;;
+        "Restart")
+            if gum_confirm "Restart $service?"; then
+                run_privileged systemctl restart "$service" && success "Restarted $service"
+            fi
+            ;;
+        "Reload")
+            if gum_confirm "Reload $service?"; then
+                run_privileged systemctl reload "$service" && success "Reloaded $service"
+            fi
+            ;;
+        "Status")
+            systemctl status "$service"
+            ;;
     esac
 }
 
@@ -2665,7 +2727,15 @@ worker_control() {
 
     [[ -z "$choice" ]] && { msg "Cancelled"; return; }
 
+    # Confirm dangerous actions
+    local confirm_default="yes"
+    [[ "$action" == "stop" ]] && confirm_default="no"
+
     if [[ "$choice" == "All workers" ]]; then
+        if ! gum_confirm "${action^} all workers?" "$confirm_default"; then
+            msg "Cancelled"
+            return
+        fi
         while IFS= read -r worker; do
             local program_name="${PHPVM_WORKER_PREFIX}${project_id}_${worker}"
             run_privileged supervisorctl "$action" "${program_name}:*"
@@ -2674,6 +2744,10 @@ worker_control() {
     else
         local worker_name
         worker_name=$(echo "$choice" | cut -d' ' -f1)
+        if ! gum_confirm "${action^} worker '$worker_name'?" "$confirm_default"; then
+            msg "Cancelled"
+            return
+        fi
         local program_name="${PHPVM_WORKER_PREFIX}${project_id}_${worker_name}"
         run_privileged supervisorctl "$action" "${program_name}:*"
         success "Worker '$worker_name' ${action}ed"
@@ -3089,229 +3163,206 @@ cron_remove_all() {
 # === serve.sh ===
 
 cmd_serve() {
-    local framework
-    framework=$(detect_framework)
-
-    if [[ -z "$framework" ]]; then
-        error "Not in a PHP framework project directory"
-        echo "Supported: Laravel, Symfony, Yii2"
-        return 1
-    fi
-
     local php_bin
     php_bin=$(get_php_binary)
 
+    local framework
+    framework=$(detect_framework)
+
+    # Check for --octane flag (Laravel only)
+    local use_octane=false
+    local remaining_args=()
+
+    for arg in "$@"; do
+        if [[ "$arg" == "--octane" ]]; then
+            use_octane=true
+        else
+            remaining_args+=("$arg")
+        fi
+    done
+
+    set -- "${remaining_args[@]}"
+
+    # Parse shorthand arguments
+    local args=()
+    local host=""
+    local port=""
+
+    if [[ $# -gt 0 ]]; then
+        local first_arg="$1"
+
+        # Check if first arg is shorthand format
+        if [[ "$first_arg" =~ ^:([0-9]+)$ ]]; then
+            # :8080 format -> host=0.0.0.0, port=8080
+            host="0.0.0.0"
+            port="${BASH_REMATCH[1]}"
+            shift
+        elif [[ "$first_arg" =~ ^([0-9]+)$ ]]; then
+            # 8080 format -> host=127.0.0.1, port=8080
+            host="127.0.0.1"
+            port="${BASH_REMATCH[1]}"
+            shift
+        elif [[ "$first_arg" =~ ^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)$ ]]; then
+            # 10.0.0.1:8080 format
+            host="${BASH_REMATCH[1]}"
+            port="${BASH_REMATCH[2]}"
+            shift
+        elif [[ "$first_arg" =~ ^([a-zA-Z0-9.-]+):([0-9]+)$ ]]; then
+            # hostname:8080 format (e.g., localhost:8080)
+            host="${BASH_REMATCH[1]}"
+            port="${BASH_REMATCH[2]}"
+            shift
+        fi
+    fi
+
+    # Handle Laravel Octane
+    if [[ "$use_octane" == "true" ]]; then
+        if [[ "$framework" != "laravel" ]]; then
+            error "Octane is only available for Laravel projects"
+            return 1
+        fi
+        serve_octane "$php_bin" "$host" "$port" "$@"
+        return
+    fi
+
+    # Build framework-specific arguments
+    if [[ -n "$host" && -n "$port" ]]; then
+        case "$framework" in
+            laravel)
+                args=("--host=$host" "--port=$port")
+                ;;
+            symfony)
+                args=("$host:$port")
+                ;;
+            yii)
+                args=("$host:$port")
+                ;;
+            *)
+                # Non-framework: handled in serve_builtin
+                args=("--host" "$host" "--port" "$port")
+                ;;
+        esac
+    fi
+
+    # Add remaining arguments
+    args+=("$@")
+
     case "$framework" in
-        laravel)  serve_laravel "$php_bin" ;;
-        symfony)  serve_symfony "$php_bin" ;;
-        yii)      serve_yii "$php_bin" ;;
+        laravel)
+            serve_laravel "$php_bin" "${args[@]}"
+            ;;
+        symfony)
+            serve_symfony "$php_bin" "${args[@]}"
+            ;;
+        yii)
+            serve_yii "$php_bin" "${args[@]}"
+            ;;
+        *)
+            serve_builtin "$php_bin" "${args[@]}"
+            ;;
     esac
 }
 
 serve_laravel() {
     local php_bin="$1"
-
-    local options=("artisan serve (built-in)")
-
-    if has_octane; then
-        options+=("Octane (Swoole/RoadRunner)")
-    fi
-
-    options+=("PHP built-in server")
-
-    local choice
-    choice=$(gum_menu "Select server for Laravel:" "${options[@]}")
-
-    case "$choice" in
-        "artisan serve"*)
-            serve_artisan "$php_bin"
-            ;;
-        "Octane"*)
-            serve_octane "$php_bin"
-            ;;
-        "PHP built-in"*)
-            serve_builtin "$php_bin" "public"
-            ;;
-        *)
-            msg "Cancelled"
-            ;;
-    esac
-}
-
-serve_symfony() {
-    local php_bin="$1"
-
-    local choice
-    choice=$(gum_menu "Select server for Symfony:" \
-        "bin/console server:start" \
-        "symfony serve (if installed)" \
-        "PHP built-in server")
-
-    case "$choice" in
-        "bin/console"*)
-            serve_symfony_console "$php_bin"
-            ;;
-        "symfony serve"*)
-            serve_symfony_cli
-            ;;
-        "PHP built-in"*)
-            serve_builtin "$php_bin" "public"
-            ;;
-        *)
-            msg "Cancelled"
-            ;;
-    esac
-}
-
-serve_yii() {
-    local php_bin="$1"
-
-    local choice
-    choice=$(gum_menu "Select server for Yii2:" \
-        "yii serve (built-in)" \
-        "PHP built-in server")
-
-    case "$choice" in
-        "yii serve"*)
-            serve_yii_builtin "$php_bin"
-            ;;
-        "PHP built-in"*)
-            serve_builtin "$php_bin" "web"
-            ;;
-        *)
-            msg "Cancelled"
-            ;;
-    esac
-}
-
-serve_artisan() {
-    local php_bin="$1"
-
-    local host
-    host=$(gum_input "Host:" "127.0.0.1")
-
-    local port
-    port=$(gum_input "Port:" "8000")
+    shift
 
     echo ""
     info_log "Starting Laravel development server..."
-    echo "${CYAN}http://${host}:${port}${RESET}"
     echo "${DIM}Press Ctrl+C to stop${RESET}"
     echo ""
 
-    "$php_bin" artisan serve --host="$host" --port="$port"
+    "$php_bin" artisan serve "$@"
 }
 
 serve_octane() {
     local php_bin="$1"
+    local host="$2"
+    local port="$3"
+    shift 3
 
-    local server
-    server=$(gum_menu "Octane server:" \
-        "Swoole" \
-        "RoadRunner" \
-        "FrankenPHP")
-
-    local host
-    host=$(gum_input "Host:" "127.0.0.1")
-
-    local port
-    port=$(gum_input "Port:" "8000")
-
-    local workers
-    workers=$(gum_input "Workers:" "auto")
-
-    echo ""
-    info_log "Starting Laravel Octane (${server})..."
-    echo "${CYAN}http://${host}:${port}${RESET}"
-    echo "${DIM}Press Ctrl+C to stop${RESET}"
-    echo ""
-
-    local server_option
-    case "$server" in
-        "Swoole")      server_option="--server=swoole" ;;
-        "RoadRunner")  server_option="--server=roadrunner" ;;
-        "FrankenPHP")  server_option="--server=frankenphp" ;;
-    esac
-
-    "$php_bin" artisan octane:start $server_option --host="$host" --port="$port" --workers="$workers"
-}
-
-serve_symfony_console() {
-    local php_bin="$1"
-
-    local host
-    host=$(gum_input "Host:" "127.0.0.1")
-
-    local port
-    port=$(gum_input "Port:" "8000")
-
-    echo ""
-    info_log "Starting Symfony development server..."
-    echo "${CYAN}http://${host}:${port}${RESET}"
-    echo "${DIM}Press Ctrl+C to stop${RESET}"
-    echo ""
-
-    "$php_bin" bin/console server:start "${host}:${port}"
-}
-
-serve_symfony_cli() {
-    if ! command_exists symfony; then
-        error "Symfony CLI is not installed"
-        echo "Install: https://symfony.com/download"
+    # Check if Octane is installed
+    if ! grep -q '"laravel/octane"' composer.json 2>/dev/null; then
+        error "Laravel Octane is not installed"
+        echo "Install with: composer require laravel/octane"
         return 1
     fi
 
-    local port
-    port=$(gum_input "Port:" "8000")
+    # Build octane arguments
+    local octane_args=()
+    [[ -n "$host" ]] && octane_args+=("--host=$host")
+    [[ -n "$port" ]] && octane_args+=("--port=$port")
+    octane_args+=("$@")
 
     echo ""
-    info_log "Starting Symfony local server..."
+    info_log "Starting Laravel Octane..."
     echo "${DIM}Press Ctrl+C to stop${RESET}"
     echo ""
 
-    symfony serve --port="$port"
+    "$php_bin" artisan octane:start "${octane_args[@]}"
 }
 
-serve_yii_builtin() {
+serve_symfony() {
     local php_bin="$1"
+    shift
 
-    local host
-    host=$(gum_input "Host:" "localhost")
+    echo ""
+    info_log "Starting Symfony development server..."
+    echo "${DIM}Press Ctrl+C to stop${RESET}"
+    echo ""
 
-    local port
-    port=$(gum_input "Port:" "8080")
+    "$php_bin" bin/console server:start "$@"
+}
+
+serve_yii() {
+    local php_bin="$1"
+    shift
 
     echo ""
     info_log "Starting Yii2 development server..."
-    echo "${CYAN}http://${host}:${port}${RESET}"
     echo "${DIM}Press Ctrl+C to stop${RESET}"
     echo ""
 
-    "$php_bin" yii serve "$host:$port"
+    "$php_bin" yii serve "$@"
 }
 
 serve_builtin() {
     local php_bin="$1"
-    local docroot="${2:-public}"
+    shift
 
-    local host
-    host=$(gum_input "Host:" "127.0.0.1")
+    local host="0.0.0.0"
+    local port="8000"
+    local docroot="."
 
-    local port
-    port=$(gum_input "Port:" "8000")
+    # Parse options
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --host|-h)
+                host="$2"
+                shift 2
+                ;;
+            --port|-p)
+                port="$2"
+                shift 2
+                ;;
+            --dir|-d|-t)
+                docroot="$2"
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
 
-    # Check if docroot exists
-    if [[ ! -d "$docroot" ]]; then
-        local available_dirs=()
-        [[ -d "public" ]] && available_dirs+=("public")
-        [[ -d "web" ]] && available_dirs+=("web")
-        [[ -d "www" ]] && available_dirs+=("www")
-        available_dirs+=("." "Custom path")
-
-        docroot=$(gum_menu "Document root:" "${available_dirs[@]}")
-
-        if [[ "$docroot" == "Custom path" ]]; then
-            docroot=$(gum_input "Document root path:" ".")
+    # Auto-detect document root
+    if [[ "$docroot" == "." ]]; then
+        if [[ -d "public" ]]; then
+            docroot="public"
+        elif [[ -d "web" ]]; then
+            docroot="web"
+        elif [[ -d "www" ]]; then
+            docroot="www"
         fi
     fi
 
@@ -3327,86 +3378,89 @@ serve_builtin() {
 
 # === menu.sh ===
 
-TERM_LINES=""
-TERM_COLS=""
+declare -A MENU_ITEMS
+declare -A MENU_HOTKEYS
 
-update_term_size() {
-    TERM_LINES=$(tput lines 2>/dev/null || echo 24)
-    TERM_COLS=$(tput cols 2>/dev/null || echo 80)
-}
+init_menu_items() {
+    local framework="$1"
 
-clear_screen() {
-    printf '\033[2J\033[H'
-}
+    # Clear arrays
+    MENU_ITEMS=()
+    MENU_HOTKEYS=()
 
-hide_cursor() { printf '\033[?25l'; }
-show_cursor() { printf '\033[?25h'; }
+    # Version Management
+    MENU_ITEMS["[u] Switch PHP version"]="cmd_use"
+    MENU_HOTKEYS["u"]="cmd_use"
 
-move_cursor() { printf '\033[%d;%dH' "$1" "$2"; }
+    MENU_ITEMS["[i] Install PHP/extension"]="cmd_install"
+    MENU_HOTKEYS["i"]="cmd_install"
 
-read_key() {
-    local key
-    IFS= read -rsn1 key 2>/dev/null
+    MENU_ITEMS["[l] List installed versions"]="cmd_list"
+    MENU_HOTKEYS["l"]="cmd_list"
 
-    # Check for escape sequences (arrow keys, etc.)
-    if [[ "$key" == $'\x1b' ]]; then
-        read -rsn2 -t 0.1 key2 2>/dev/null
-        key+="$key2"
-    fi
+    # Configuration
+    MENU_ITEMS["[c] Edit PHP configuration"]="cmd_config"
+    MENU_HOTKEYS["c"]="cmd_config"
 
-    echo "$key"
+    MENU_ITEMS["[f] Manage PHP-FPM"]="cmd_fpm"
+    MENU_HOTKEYS["f"]="cmd_fpm"
+
+    MENU_ITEMS["[n] Nginx management"]="cmd_nginx"
+    MENU_HOTKEYS["n"]="cmd_nginx"
+
+    # Development
+    MENU_ITEMS["[s] Start dev server"]="cmd_serve"
+    MENU_HOTKEYS["s"]="cmd_serve"
+
+    # Logs
+    MENU_ITEMS["[g] Log viewer"]="cmd_logs"
+    MENU_HOTKEYS["g"]="cmd_logs"
+
+    # Info & Help
+    MENU_ITEMS["[o] Show PHP info"]="cmd_info"
+    MENU_HOTKEYS["o"]="cmd_info"
+
+    MENU_ITEMS["[?] Help"]="show_help"
+    MENU_HOTKEYS["?"]="show_help"
+
+    # Quit
+    MENU_ITEMS["[q] Quit"]="quit_menu"
+    MENU_HOTKEYS["q"]="quit_menu"
 }
 
 cmd_menu() {
-    # Check for gum
     if [[ "$UI_MODE" != "gum" ]]; then
         fallback_menu
         return
     fi
 
-    update_term_size
-    trap 'show_cursor; clear_screen' EXIT
-
     local framework
     framework=$(detect_framework 2>/dev/null)
 
-    while true; do
-        clear_screen
-        hide_cursor
+    init_menu_items "$framework"
 
-        if ! dashboard_main "$framework"; then
+    while true; do
+        clear
+
+        # Print header
+        print_menu_header "$framework"
+
+        # Show menu with gum choose (supports arrow keys)
+        local selected
+        selected=$(show_interactive_menu "$framework")
+
+        # Handle selection or check for quit
+        if [[ -z "$selected" || "$selected" == "[q] Quit" ]]; then
+            clear
             break
         fi
+
+        # Execute selected command
+        execute_menu_item "$selected"
     done
-
-    show_cursor
-    clear_screen
 }
 
-dashboard_main() {
-    local framework="$1"
-
-    update_term_size
-    local height=$((TERM_LINES - 2))
-
-    # Print header
-    print_dashboard_header "$framework"
-
-    # Print menu with hotkeys
-    print_hotkey_menu "$framework"
-
-    # Print footer
-    print_footer
-
-    # Wait for key
-    local key
-    key=$(read_key)
-
-    # Handle key
-    handle_hotkey "$key" "$framework"
-}
-
-print_dashboard_header() {
+print_menu_header() {
     local framework="$1"
 
     local version
@@ -3414,31 +3468,44 @@ print_dashboard_header() {
     local full_version
     full_version=$(get_full_php_version "$version" 2>/dev/null)
 
-    local project_info=""
+    # Build status line
+    local status_line="PHP ${full_version:-$version:-not installed}"
+
+    # Add framework info
     if [[ -n "$framework" ]]; then
-        local project_name
-        project_name=$(get_project_name 2>/dev/null)
-        project_info=" │ $(get_framework_display_name "$framework"): ${project_name}"
-    fi
-
-    # Get nginx status
-    local nginx_status=""
-    if command -v nginx &>/dev/null; then
-        if pgrep -x nginx &>/dev/null; then
-            nginx_status="${GREEN}●${RESET}"
+        local fw_name fw_version
+        fw_name=$(get_framework_display_name "$framework")
+        fw_version=$(get_framework_version "$framework" 2>/dev/null)
+        if [[ -n "$fw_version" ]]; then
+            status_line="${status_line} | ${fw_name} v${fw_version}"
         else
-            nginx_status="${RED}●${RESET}"
+            status_line="${status_line} | ${fw_name}"
         fi
     fi
 
-    # Get FPM status
-    local fpm_status=""
-    if [[ -n "$version" ]]; then
-        if pgrep -f "php-fpm${version}\|php${version}-fpm" &>/dev/null; then
-            fpm_status="${GREEN}●${RESET}"
-        else
-            fpm_status="${RED}●${RESET}"
-        fi
+    # Get service status
+    local nginx_status="off"
+    local fpm_status="off"
+
+    if command -v nginx &>/dev/null && pgrep -x nginx &>/dev/null; then
+        nginx_status="on"
+    fi
+
+    if [[ -n "$version" ]] && pgrep -f "php-fpm${version}\|php${version}-fpm" &>/dev/null; then
+        fpm_status="on"
+    fi
+
+    # Build service status line
+    local services=""
+    if [[ "$nginx_status" == "on" ]]; then
+        services="nginx ${GREEN}●${RESET}"
+    else
+        services="nginx ${RED}○${RESET}"
+    fi
+    if [[ "$fpm_status" == "on" ]]; then
+        services="${services}  fpm ${GREEN}●${RESET}"
+    else
+        services="${services}  fpm ${RED}○${RESET}"
     fi
 
     echo ""
@@ -3446,203 +3513,107 @@ print_dashboard_header() {
         --border double \
         --border-foreground 212 \
         --padding "0 2" \
-        --margin "0 1" \
-        --bold \
-        "PHPVM Dashboard v${PHPVM_VERSION}" \
-        "PHP ${full_version:-$version}${project_info}" \
-        "nginx $nginx_status  fpm $fpm_status"
+        --margin "0 2" \
+        --align center \
+        "$(gum style --bold --foreground 212 "PHPVM Dashboard v${PHPVM_VERSION}")" \
+        "" \
+        "$status_line" \
+        "" \
+        "$services"
     echo ""
 }
 
-print_hotkey_menu() {
+show_interactive_menu() {
     local framework="$1"
 
-    # Calculate available height
-    local menu_height=$((TERM_LINES - 15))
-    [[ $menu_height -lt 10 ]] && menu_height=10
+    # Build menu options
+    local options=()
 
-    # Build menu items with hotkeys
-    local items=()
+    # Section: Version Management
+    options+=("─── Version Management ───")
+    options+=("[u] Switch PHP version")
+    options+=("[i] Install PHP/extension")
+    options+=("[l] List installed versions")
 
-    # Version Management
-    items+=("${BOLD}${CYAN}Version Management${RESET}")
-    items+=("  ${YELLOW}[u]${RESET} use         Switch PHP version")
-    items+=("  ${YELLOW}[i]${RESET} install     Install PHP or extension")
-    items+=("  ${YELLOW}[l]${RESET} list        List installed versions")
+    # Section: Configuration
+    options+=("─── Configuration ───")
+    options+=("[c] Edit PHP configuration")
+    options+=("[f] Manage PHP-FPM")
+    options+=("[n] Nginx management")
 
-    items+=("")
-    items+=("${BOLD}${CYAN}Configuration${RESET}")
-    items+=("  ${YELLOW}[c]${RESET} config      Edit PHP configuration")
-    items+=("  ${YELLOW}[f]${RESET} fpm         Manage PHP-FPM")
-    items+=("  ${YELLOW}[n]${RESET} nginx       Nginx management")
+    # Section: Development
+    options+=("─── Development ───")
+    options+=("[s] Start dev server")
+    options+=("[g] Log viewer")
 
-    items+=("")
-    items+=("${BOLD}${CYAN}Logs & Monitoring${RESET}")
-    items+=("  ${YELLOW}[g]${RESET} logs        Log viewer")
-    items+=("  ${YELLOW}[t]${RESET} tail        Follow logs")
-    items+=("  ${YELLOW}[p]${RESET} processes   Backend processes")
+    # Section: Other
+    options+=("─── Other ───")
+    options+=("[o] Show PHP info")
+    options+=("[?] Help")
+    options+=("[q] Quit")
 
-    # Framework-specific
-    if [[ -n "$framework" ]]; then
-        items+=("")
-        items+=("${BOLD}${CYAN}$(get_framework_display_name "$framework") Commands${RESET}")
-        items+=("  ${YELLOW}[s]${RESET} serve       Start dev server")
-        items+=("  ${YELLOW}[w]${RESET} worker      Queue workers")
-        items+=("  ${YELLOW}[r]${RESET} cron        Scheduled tasks")
+    # Use gum choose with arrow key navigation
+    printf '%s\n' "${options[@]}" | gum choose \
+        --header "Use ↑↓ arrows to navigate, Enter to select, or press hotkey" \
+        --header.foreground 241 \
+        --cursor "▸ " \
+        --cursor.foreground 212 \
+        --selected.foreground 212 \
+        --height 18
+}
 
-        case "$framework" in
-            laravel)
-                items+=("  ${YELLOW}[a]${RESET} artisan     Run artisan command")
-                has_horizon 2>/dev/null && items+=("  ${YELLOW}[H]${RESET} horizon     Start Horizon")
-                has_octane 2>/dev/null && items+=("  ${YELLOW}[o]${RESET} octane      Start Octane")
-                ;;
-            symfony)
-                items+=("  ${YELLOW}[a]${RESET} console     Run console command")
-                ;;
-            yii)
-                items+=("  ${YELLOW}[a]${RESET} yii         Run yii command")
-                ;;
-        esac
+execute_menu_item() {
+    local selected="$1"
+
+    # Skip section headers
+    if [[ "$selected" == "───"* ]]; then
+        return 0
     fi
 
-    items+=("")
-    items+=("${BOLD}${CYAN}Other${RESET}")
-    items+=("  ${YELLOW}[?]${RESET} help        Show help")
-    items+=("  ${YELLOW}[U]${RESET} update      Update PHPVM")
-    items+=("  ${YELLOW}[q]${RESET} quit        Exit dashboard")
+    clear
 
-    # Print items
-    for item in "${items[@]}"; do
-        echo -e "$item"
-    done
-}
-
-print_footer() {
-    local footer_line=$((TERM_LINES - 1))
-
-    echo ""
-    echo "${DIM}Press hotkey to select │ Ctrl-C to exit │ ? for help${RESET}"
-}
-
-handle_hotkey() {
-    local key="$1"
-    local framework="$2"
-
-    show_cursor
-
-    case "$key" in
-        # Ctrl-C or q to quit
-        $'\x03'|q|Q)
-            return 1
-            ;;
-
-        # Version Management
-        u|U)
-            clear_screen
+    case "$selected" in
+        "[u] Switch PHP version")
             cmd_use
             wait_for_key
             ;;
-        i|I)
-            clear_screen
+        "[i] Install PHP/extension")
             cmd_install
             wait_for_key
             ;;
-        l|L)
-            clear_screen
+        "[l] List installed versions")
             cmd_list
             wait_for_key
             ;;
-
-        # Configuration
-        c|C)
-            clear_screen
+        "[c] Edit PHP configuration")
             cmd_config
             wait_for_key
             ;;
-        f|F)
-            clear_screen
+        "[f] Manage PHP-FPM")
             cmd_fpm
             wait_for_key
             ;;
-        n|N)
-            clear_screen
-            nginx_submenu
-            ;;
-
-        # Logs & Monitoring
-        g|G)
-            clear_screen
-            cmd_logs
-            ;;
-        t|T)
-            clear_screen
-            tail_submenu
-            ;;
-        p|P)
-            clear_screen
-            show_backend_processes
+        "[n] Nginx management")
+            cmd_nginx
             wait_for_key
             ;;
-
-        # Framework commands
-        s|S)
-            if [[ -n "$framework" ]]; then
-                clear_screen
-                cmd_serve
-                wait_for_key
-            fi
+        "[s] Start dev server")
+            cmd_serve
+            wait_for_key
             ;;
-        w|W)
-            if [[ -n "$framework" ]]; then
-                clear_screen
-                cmd_worker
-                wait_for_key
-            fi
+        "[g] Log viewer")
+            cmd_logs
             ;;
-        r|R)
-            if [[ -n "$framework" ]]; then
-                clear_screen
-                cmd_cron
-                wait_for_key
-            fi
+        "[o] Show PHP info")
+            cmd_info
+            wait_for_key
             ;;
-        a|A)
-            if [[ -n "$framework" ]]; then
-                clear_screen
-                run_framework_console_interactive "$framework"
-                wait_for_key
-            fi
-            ;;
-        H)
-            if [[ "$framework" == "laravel" ]] && has_horizon 2>/dev/null; then
-                clear_screen
-                run_horizon
-            fi
-            ;;
-        o|O)
-            if [[ "$framework" == "laravel" ]] && has_octane 2>/dev/null; then
-                clear_screen
-                run_octane
-            fi
-            ;;
-
-        # Other
-        \?|h)
-            clear_screen
+        "[?] Help")
             show_help
             wait_for_key
             ;;
-        U)
-            clear_screen
-            cmd_self_update
-            wait_for_key
-            ;;
-
-        # Info shortcut
-        "")
-            clear_screen
-            cmd_info
-            wait_for_key
+        "[q] Quit")
+            return 1
             ;;
     esac
 
@@ -3651,231 +3622,8 @@ handle_hotkey() {
 
 wait_for_key() {
     echo ""
-    echo "${DIM}Press any key to continue...${RESET}"
+    gum style --foreground 241 "Press any key to continue..."
     read -rsn1
-}
-
-nginx_submenu() {
-    while true; do
-        clear_screen
-        echo ""
-        gum style \
-            --border rounded \
-            --border-foreground 99 \
-            --padding "0 2" \
-            --bold \
-            "Nginx Management"
-        echo ""
-
-        echo "${BOLD}${CYAN}Commands${RESET}"
-        echo "  ${YELLOW}[i]${RESET} info        Show configuration info"
-        echo "  ${YELLOW}[v]${RESET} view        View configuration"
-        echo "  ${YELLOW}[e]${RESET} edit        Edit configuration"
-        echo "  ${YELLOW}[g]${RESET} generate    Generate new config"
-        echo "  ${YELLOW}[r]${RESET} reload      Reload nginx"
-        echo "  ${YELLOW}[R]${RESET} restart     Restart nginx"
-        echo "  ${YELLOW}[t]${RESET} test        Test configuration"
-        echo "  ${YELLOW}[p]${RESET} processes   Show backends"
-        echo "  ${YELLOW}[m]${RESET} templates   Manage templates"
-        echo ""
-        echo "  ${YELLOW}[b]${RESET} back        Return to dashboard"
-        echo "  ${YELLOW}[q]${RESET} quit        Exit"
-        echo ""
-        echo "${DIM}Press hotkey to select${RESET}"
-
-        local key
-        key=$(read_key)
-
-        case "$key" in
-            $'\x03'|q|Q) return 1 ;;
-            b|B|\x1b) return 0 ;;
-            i|I)
-                show_nginx_info
-                wait_for_key
-                ;;
-            v|V)
-                view_nginx_config
-                wait_for_key
-                ;;
-            e|E)
-                local config_file
-                config_file=$(select_nginx_config 2>/dev/null)
-                [[ -n "$config_file" ]] && run_privileged "${EDITOR:-nano}" "$config_file"
-                ;;
-            g|G)
-                generate_nginx_config
-                wait_for_key
-                ;;
-            r)
-                nginx_reload
-                wait_for_key
-                ;;
-            R)
-                nginx_restart
-                wait_for_key
-                ;;
-            t|T)
-                run_privileged nginx -t
-                wait_for_key
-                ;;
-            p|P)
-                show_backend_processes
-                wait_for_key
-                ;;
-            m|M)
-                templates_submenu
-                ;;
-        esac
-    done
-}
-
-templates_submenu() {
-    while true; do
-        clear_screen
-        echo ""
-        gum style \
-            --border rounded \
-            --border-foreground 99 \
-            --padding "0 2" \
-            --bold \
-            "Template Management"
-        echo ""
-
-        echo "  ${YELLOW}[l]${RESET} list        List templates"
-        echo "  ${YELLOW}[a]${RESET} add         Add template"
-        echo "  ${YELLOW}[e]${RESET} edit        Edit template"
-        echo "  ${YELLOW}[d]${RESET} delete      Delete template"
-        echo ""
-        echo "  ${YELLOW}[b]${RESET} back        Return"
-        echo ""
-        echo "${DIM}Press hotkey to select${RESET}"
-
-        local key
-        key=$(read_key)
-
-        case "$key" in
-            $'\x03'|q|Q) return 1 ;;
-            b|B|\x1b) return 0 ;;
-            l|L)
-                list_custom_templates
-                wait_for_key
-                ;;
-            a|A)
-                add_custom_template
-                wait_for_key
-                ;;
-            e|E)
-                edit_custom_template
-                wait_for_key
-                ;;
-            d|D)
-                delete_custom_template
-                wait_for_key
-                ;;
-        esac
-    done
-}
-
-tail_submenu() {
-    while true; do
-        clear_screen
-        echo ""
-        gum style \
-            --border rounded \
-            --border-foreground 99 \
-            --padding "0 2" \
-            --bold \
-            "Tail Logs"
-        echo ""
-
-        echo "  ${YELLOW}[1]${RESET} app         Application log"
-        echo "  ${YELLOW}[2]${RESET} access      Nginx access log"
-        echo "  ${YELLOW}[3]${RESET} error       Nginx error log"
-        echo "  ${YELLOW}[4]${RESET} worker      Supervisor log"
-        echo "  ${YELLOW}[5]${RESET} fpm         PHP-FPM log"
-        echo "  ${YELLOW}[a]${RESET} all         All logs"
-        echo "  ${YELLOW}[s]${RESET} split       Split screen (tmux)"
-        echo ""
-        echo "  ${YELLOW}[b]${RESET} back        Return"
-        echo ""
-        echo "${DIM}Press number or letter to select${RESET}"
-
-        local key
-        key=$(read_key)
-
-        case "$key" in
-            $'\x03'|q|Q) return 1 ;;
-            b|B|\x1b) return 0 ;;
-            1)
-                follow_log "app"
-                ;;
-            2)
-                follow_log "access"
-                ;;
-            3)
-                follow_log "error"
-                ;;
-            4)
-                follow_log "worker"
-                ;;
-            5)
-                follow_log "fpm"
-                ;;
-            a|A)
-                follow_all_logs
-                ;;
-            s|S)
-                split_screen_viewer
-                ;;
-        esac
-    done
-}
-
-run_framework_console_interactive() {
-    local framework="$1"
-    local php_bin
-    php_bin=$(get_php_binary)
-
-    local prompt=""
-    local cmd_prefix=""
-
-    case "$framework" in
-        laravel)
-            prompt="artisan command:"
-            cmd_prefix="artisan"
-            ;;
-        symfony)
-            prompt="console command:"
-            cmd_prefix="bin/console"
-            ;;
-        yii)
-            prompt="yii command:"
-            cmd_prefix="yii"
-            ;;
-    esac
-
-    local cmd
-    cmd=$(gum_input "$prompt" "")
-
-    if [[ -n "$cmd" ]]; then
-        "$php_bin" $cmd_prefix $cmd
-    fi
-}
-
-run_horizon() {
-    local php_bin
-    php_bin=$(get_php_binary)
-
-    echo ""
-    info_log "Starting Laravel Horizon..."
-    echo "${DIM}Press Ctrl+C to stop${RESET}"
-    echo ""
-
-    "$php_bin" artisan horizon
-}
-
-run_octane() {
-    serve_octane "$(get_php_binary)"
 }
 
 fallback_menu() {
@@ -3887,115 +3635,43 @@ fallback_menu() {
         print_header
 
         echo ""
-        echo "${BOLD}Commands:${RESET}"
+        echo "${BOLD}─── Version Management ───${RESET}"
         echo "  1) Switch PHP version"
         echo "  2) Install PHP/extension"
         echo "  3) List versions"
-        echo "  4) PHP info"
-        echo "  5) Edit config"
-        echo "  6) Manage FPM"
-        echo "  7) Nginx management"
-        echo "  8) View logs"
-
-        if [[ -n "$framework" ]]; then
-            echo ""
-            echo "${BOLD}$(get_framework_display_name "$framework"):${RESET}"
-            echo "  s) Start dev server"
-            echo "  w) Manage workers"
-            echo "  c) Manage cron"
-        fi
-
         echo ""
+        echo "${BOLD}─── Configuration ───${RESET}"
+        echo "  4) Edit PHP config"
+        echo "  5) Manage PHP-FPM"
+        echo "  6) Nginx management"
+        echo ""
+        echo "${BOLD}─── Development ───${RESET}"
+        echo "  7) Start dev server"
+        echo "  8) Log viewer"
+        echo ""
+        echo "${BOLD}─── Other ───${RESET}"
+        echo "  9) Show PHP info"
         echo "  h) Help"
         echo "  q) Quit"
         echo ""
 
         local choice
-        read -rp "Select: " choice
+        read -rp "Select [1-9/h/q]: " choice
 
         case "$choice" in
-            1) cmd_use; read -rp "Press Enter..." ;;
-            2) cmd_install; read -rp "Press Enter..." ;;
-            3) cmd_list; read -rp "Press Enter..." ;;
-            4) cmd_info; read -rp "Press Enter..." ;;
-            5) cmd_config; read -rp "Press Enter..." ;;
-            6) cmd_fpm; read -rp "Press Enter..." ;;
-            7) cmd_nginx; read -rp "Press Enter..." ;;
-            8) cmd_logs; read -rp "Press Enter..." ;;
-            s|S) [[ -n "$framework" ]] && { cmd_serve; read -rp "Press Enter..."; } ;;
-            w|W) [[ -n "$framework" ]] && { cmd_worker; read -rp "Press Enter..."; } ;;
-            c|C) [[ -n "$framework" ]] && { cmd_cron; read -rp "Press Enter..."; } ;;
-            h|H) show_help; read -rp "Press Enter..." ;;
-            q|Q) break ;;
+            1) cmd_use; read -rp "Press Enter to continue..." ;;
+            2) cmd_install; read -rp "Press Enter to continue..." ;;
+            3) cmd_list; read -rp "Press Enter to continue..." ;;
+            4) cmd_config; read -rp "Press Enter to continue..." ;;
+            5) cmd_fpm; read -rp "Press Enter to continue..." ;;
+            6) cmd_nginx; read -rp "Press Enter to continue..." ;;
+            7) cmd_serve; read -rp "Press Enter to continue..." ;;
+            8) cmd_logs ;;
+            9) cmd_info; read -rp "Press Enter to continue..." ;;
+            h|H) show_help; read -rp "Press Enter to continue..." ;;
+            q|Q) clear; break ;;
         esac
     done
-}
-
-hotkey_select() {
-    local header="$1"
-    shift
-    local items=("$@")
-    local count=${#items[@]}
-
-    if [[ $count -eq 0 ]]; then
-        return 1
-    fi
-
-    echo ""
-    echo "${BOLD}$header${RESET}"
-    echo ""
-
-    local i=1
-    for item in "${items[@]}"; do
-        if [[ $i -le 9 ]]; then
-            echo "  ${YELLOW}[$i]${RESET} $item"
-        else
-            echo "      $item"
-        fi
-        ((i++))
-    done
-
-    echo ""
-    echo "  ${YELLOW}[b]${RESET} Back/Cancel"
-    echo ""
-    echo "${DIM}Press number to select${RESET}"
-
-    local key
-    key=$(read_key)
-
-    case "$key" in
-        $'\x03'|b|B|q|Q|\x1b)
-            return 1
-            ;;
-        [1-9])
-            local idx=$((key - 1))
-            if [[ $idx -lt $count ]]; then
-                echo "${items[$idx]}"
-                return 0
-            fi
-            ;;
-    esac
-
-    return 1
-}
-
-hotkey_confirm() {
-    local question="$1"
-
-    echo ""
-    echo "$question"
-    echo ""
-    echo "  ${YELLOW}[y]${RESET} Yes"
-    echo "  ${YELLOW}[n]${RESET} No"
-    echo ""
-
-    local key
-    key=$(read_key)
-
-    case "$key" in
-        y|Y) return 0 ;;
-        *) return 1 ;;
-    esac
 }
 
 # === nginx.sh ===
@@ -5225,10 +4901,14 @@ cmd_nginx() {
             show_nginx_info
             ;;
         reload)
-            nginx_reload
+            if gum_confirm "Reload nginx configuration?"; then
+                nginx_reload
+            fi
             ;;
         restart)
-            nginx_restart
+            if gum_confirm "Restart nginx service?"; then
+                nginx_restart
+            fi
             ;;
         config|view)
             view_nginx_config
@@ -5322,11 +5002,15 @@ interactive_nginx_menu() {
                 read -rp "Press Enter to continue..."
                 ;;
             "Reload Nginx")
-                nginx_reload
+                if gum_confirm "Reload nginx configuration?"; then
+                    nginx_reload
+                fi
                 read -rp "Press Enter to continue..."
                 ;;
             "Restart Nginx")
-                nginx_restart
+                if gum_confirm "Restart nginx service?"; then
+                    nginx_restart
+                fi
                 read -rp "Press Enter to continue..."
                 ;;
             "Test Configuration")
@@ -6774,6 +6458,31 @@ cmd_self_update() {
 
 # === help.sh ===
 
+show_quick_usage() {
+    local current_version
+    current_version=$(get_current_version)
+
+    print_header
+
+    cat <<EOF
+${BOLD}Usage:${RESET} php [command] [options]
+
+${BOLD}Version Management:${RESET}
+  use [version]       Switch PHP version (interactive if no version)
+  install [version]   Install PHP version or extension
+  list                List installed PHP versions
+  list extensions     List extensions for current PHP
+
+${BOLD}Quick Commands:${RESET}
+  menu                Interactive dashboard
+  info                Show PHP and system info
+  help                Show full help
+
+${BOLD}Pass-through:${RESET}
+  php [args]          Run PHP with arguments (e.g., php -v, php script.php)
+EOF
+}
+
 show_help() {
     local framework
     framework=$(detect_framework 2>/dev/null)
@@ -6811,29 +6520,18 @@ ${BOLD}Logs:${RESET}
   tail [type]         Shortcut for logs tail
 EOF
 
-    # Framework-specific commands
-    if [[ -n "$framework" ]]; then
-        cat <<EOF
+    cat <<EOF
 
-${BOLD}Project Commands ($(get_framework_display_name "$framework")):${RESET}
-  serve               Start development server
+${BOLD}Development:${RESET}
+  serve [options]     Start development server (auto-detect framework)
+                      --host HOST   Bind to host (default: 0.0.0.0)
+                      --port PORT   Listen on port (default: 8000)
+                      --dir DIR     Document root (default: auto-detect)
+                      --octane      Use Laravel Octane (Laravel only)
+                      Shorthand: 8080, :8080, 10.0.0.1:8080
   worker              Manage queue workers (Supervisor)
   cron                Manage scheduled tasks (Crontab)
 EOF
-        case "$framework" in
-            laravel)
-                echo "  artisan [cmd]       Run artisan command"
-                has_horizon 2>/dev/null && echo "  horizon             Start Laravel Horizon"
-                has_octane 2>/dev/null && echo "  octane [cmd]        Run Laravel Octane"
-                ;;
-            symfony)
-                echo "  console [cmd]       Run console command"
-                ;;
-            yii)
-                echo "  yii [cmd]           Run yii command"
-                ;;
-        esac
-    fi
 
     cat <<EOF
 
@@ -6853,8 +6551,8 @@ ${BOLD}Composer:${RESET}
 ${BOLD}Version Resolution Order:${RESET}
   1. PHPVERSION_USE environment variable (session)
   2. .phpversion file (local, searches up from current directory)
-  3. ~/.phpversion/config (user default)
-  4. /etc/phpversion (system default)
+  3. ~/.phpvm/version (user default)
+  4. /etc/phpvm/version (system default)
   5. First installed version (fallback)
 
 ${BOLD}Examples:${RESET}
@@ -6862,15 +6560,12 @@ ${BOLD}Examples:${RESET}
   php install 8.3          # Install PHP 8.3
   php install extension    # Install extension (fuzzy search)
   php menu                 # Open interactive dashboard
-  php serve                # Start dev server (in project)
-  php worker               # Manage queue workers (in project)
-  php nginx                # Interactive nginx menu / config info
-  php nginx generate       # Generate nginx config with wizard
-  php nginx processes      # Show running backends (Octane, etc.)
+  php serve                # Start dev server (auto-detect framework)
+  php serve 8080           # Start on port 8080 (localhost)
+  php serve :3000          # Start on port 3000 (all interfaces)
+  php serve --octane       # Start with Laravel Octane
   php logs                 # Interactive log viewer
-  php logs split           # Split-screen dual log viewer
   php tail app             # Follow application log
-  php logs search "error"  # Search logs with ripgrep
   echo "8.4" > .phpversion # Set project PHP version
 
 ${BOLD}Tab Completion:${RESET}

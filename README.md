@@ -26,6 +26,9 @@ curl -fsSL https://raw.githubusercontent.com/professor93/phpvm/main/dist/install
 
 # System-wide install
 curl -fsSL https://raw.githubusercontent.com/professor93/phpvm/main/dist/install.sh | sudo bash
+
+# Uninstall
+curl -fsSL https://raw.githubusercontent.com/professor93/phpvm/main/dist/install.sh | bash -s -- --uninstall
 ```
 
 ## Commands
@@ -74,48 +77,46 @@ curl -fsSL https://raw.githubusercontent.com/professor93/phpvm/main/dist/install
 
 Log types: `app`, `access`, `error`, `worker`, `fpm`, `all`
 
-### Project Commands (in Laravel/Symfony/Yii2 directories)
+### Development Commands
 
 | Command | Description |
 |---------|-------------|
-| `php serve` | Start development server |
+| `php serve` | Start development server (auto-detect framework) |
+| `php serve --port 3000` | Start server on custom port |
+| `php serve --host 127.0.0.1` | Start server on custom host |
+| `php serve --dir public` | Start server with custom document root |
 | `php worker` | Manage queue workers (Supervisor) |
 | `php cron` | Manage scheduled tasks (Crontab) |
-| `php artisan [cmd]` | Run Laravel artisan |
-| `php console [cmd]` | Run Symfony console |
-| `php yii [cmd]` | Run Yii command |
-| `php horizon` | Start Laravel Horizon |
-| `php octane [cmd]` | Run Laravel Octane |
 
 ## Interactive Dashboard
 
-Launch with `php menu` for a full-featured dashboard with hotkey navigation:
+Launch with `php menu` for a full-featured dashboard with arrow key navigation:
 
 ```
-┌─────────────────────────────────────┐
-│      PHPVM Dashboard v1.0.0         │
-│      PHP 8.4.1                      │
-│      nginx ●  fpm ●                 │
-└─────────────────────────────────────┘
+╔═════════════════════════════════════╗
+║      PHPVM Dashboard v1.2.0         ║
+║      PHP 8.4.1 | Laravel v11.0      ║
+║      nginx ●  fpm ●                 ║
+╚═════════════════════════════════════╝
 
-Version Management
-  [u] use         Switch PHP version
-  [i] install     Install PHP or extension
-  [l] list        List installed versions
+─── Version Management ───
+  [u] Switch PHP version
+  [i] Install PHP/extension
+  [l] List installed versions
 
-Configuration
-  [c] config      Edit PHP configuration
-  [f] fpm         Manage PHP-FPM
-  [n] nginx       Nginx management
+─── Configuration ───
+  [c] Edit PHP configuration
+  [f] Manage PHP-FPM
+  [n] Nginx management
 
-Logs & Monitoring
-  [g] logs        Log viewer
-  [t] tail        Follow logs
-  [p] processes   Backend processes
+─── Development ───
+  [s] Start dev server
+  [g] Log viewer
 
-Other
-  [?] help        Show help
-  [q] quit        Exit dashboard
+─── Other ───
+  [o] Show PHP info
+  [?] Help
+  [q] Quit
 ```
 
 ## Version Resolution
@@ -124,8 +125,8 @@ PHPVM resolves PHP version in this order:
 
 1. `PHPVERSION_USE` environment variable
 2. `.phpversion` file (searches up from current directory)
-3. `~/.phpversion/config` (user default)
-4. `/etc/phpversion` (system default)
+3. `~/.phpvm/version` (user default)
+4. `/etc/phpvm/version` (system default)
 5. First installed version
 
 ## Per-Project PHP Version

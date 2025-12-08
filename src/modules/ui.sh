@@ -159,6 +159,20 @@ print_header() {
 
     if [[ -n "$current_version" ]]; then
         status_text="Current: PHP ${current_version}"
+
+        # Add framework info if in a framework project
+        local framework
+        framework=$(detect_framework 2>/dev/null)
+        if [[ -n "$framework" ]]; then
+            local fw_name fw_version
+            fw_name=$(get_framework_display_name "$framework")
+            fw_version=$(get_framework_version "$framework" 2>/dev/null)
+            if [[ -n "$fw_version" ]]; then
+                status_text="${status_text} | ${fw_name} v${fw_version}"
+            else
+                status_text="${status_text} | ${fw_name}"
+            fi
+        fi
     else
         status_text="No PHP installed"
     fi
@@ -355,7 +369,15 @@ gum_spin() {
     local title="$1"
     shift
 
-    if [[ "$UI_MODE" == "gum" ]]; then
+    # Check if the first argument is a shell function
+    # gum spin runs commands in a subprocess which can't access shell functions
+    local cmd="$1"
+    local is_function=false
+    if [[ "$(type -t "$cmd" 2>/dev/null)" == "function" ]]; then
+        is_function=true
+    fi
+
+    if [[ "$UI_MODE" == "gum" && "$is_function" == "false" ]]; then
         gum spin --spinner dot --title "$title" -- "$@"
     else
         echo "${CYAN}${title}...${RESET}"

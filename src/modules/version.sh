@@ -45,10 +45,10 @@ get_current_version() {
     # 2. .phpversion file (local - searches up from $PWD)
     elif local file; file=$(find_phpversion_file) 2>/dev/null; then
         version=$(cat "$file" 2>/dev/null | tr -d '[:space:]')
-    # 3. ~/.phpversion/config (user default)
+    # 3. ~/.phpvm/version (user default)
     elif [[ -f "$PHPVM_CONFIG" ]]; then
         version=$(cat "$PHPVM_CONFIG" 2>/dev/null | tr -d '[:space:]')
-    # 4. /etc/phpversion (system default)
+    # 4. /etc/phpvm/version (system default)
     elif [[ -f "$SYSTEM_CONFIG" ]]; then
         version=$(cat "$SYSTEM_CONFIG" 2>/dev/null | tr -d '[:space:]')
     # 5. First installed version (fallback)
@@ -93,15 +93,15 @@ get_version_source() {
         return
     fi
 
-    # 3. ~/.phpversion/config (user default)
+    # 3. ~/.phpvm/version (user default)
     if [[ -f "$PHPVM_CONFIG" ]]; then
-        echo "user (~/.phpversion/config)"
+        echo "user (~/.phpvm/version)"
         return
     fi
 
-    # 4. /etc/phpversion (system default)
+    # 4. /etc/phpvm/version (system default)
     if [[ -f "$SYSTEM_CONFIG" ]]; then
-        echo "system (/etc/phpversion)"
+        echo "system (/etc/phpvm/version)"
         return
     fi
 

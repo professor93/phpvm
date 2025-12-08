@@ -153,7 +153,7 @@ set_user_version() {
     mkdir -p "$PHPVM_DIR"
     echo "$version" > "$PHPVM_CONFIG"
     success "PHP $version set as user default"
-    info_log "Updated ~/.phpversion/config"
+    info_log "Updated ~/.phpvm/version"
 }
 
 set_system_version() {
@@ -163,5 +163,5 @@ set_system_version() {
 
     run_privileged tee "$SYSTEM_CONFIG" > /dev/null <<< "$version"
     success "PHP $version set as system-wide default"
-    info_log "Updated /etc/phpversion"
+    info_log "Updated /etc/phpvm/version"
 }

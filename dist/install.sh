@@ -6,7 +6,7 @@
 
 set -o pipefail
 
-PHPVM_VERSION="1.1.0"
+PHPVM_VERSION="1.2.0"
 PHPVM_REPO="professor93/phpvm"
 PHPVM_RAW_URL="https://raw.githubusercontent.com/${PHPVM_REPO}/main"
 
@@ -295,7 +295,7 @@ do_uninstall() {
     if is_phpvm_binary "/usr/local/bin/php"; then
         sudo rm -f /usr/local/bin/php /usr/local/bin/composer
         sudo rm -f /etc/profile.d/phpvm.sh
-        sudo rm -f /etc/phpversion
+        sudo rm -rf /etc/phpvm
 
         if [[ -f "/usr/local/bin/php.backup" ]]; then
             if ui_confirm "Restore backed up PHP?"; then
@@ -320,8 +320,8 @@ do_uninstall() {
         success "Removed user-local installation"
     fi
 
-    warn "User data in ~/.phpversion was NOT removed"
-    echo "To remove completely: rm -rf ~/.phpversion"
+    warn "User data in ~/.phpvm was NOT removed"
+    echo "To remove completely: rm -rf ~/.phpvm"
 
     success "PHPVM uninstalled"
     echo "Please restart your shell or run: source ~/.bashrc"
@@ -424,7 +424,7 @@ do_install() {
     rm -rf "$tmp_dir"
 
     # Create user directory
-    mkdir -p "$HOME/.phpversion"
+    mkdir -p "$HOME/.phpvm"
 
     success "PHPVM installed successfully!"
     echo ""

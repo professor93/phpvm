@@ -5,7 +5,7 @@
 set -o pipefail
 
 # Version (overridden by config.sh)
-PHPVM_VERSION="1.1.0"
+PHPVM_VERSION="1.2.0"
 
 # Source modules (will be inlined for distribution)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -39,11 +39,6 @@ is_phpvm_command() {
     case "$1" in
         use|install|list|info|config|fpm|menu|serve|worker|cron|nginx|logs|tail|completion|self-update|selfupdate|update|help|--help|-h)
             return 0
-            ;;
-        artisan|console|yii|horizon|octane)
-            # Framework commands - only if in project directory
-            is_framework_project && return 0
-            return 1
             ;;
         *)
             return 1
@@ -121,10 +116,10 @@ main() {
             cmd_menu
             ;;
 
-        # Framework commands (only available in project directories)
+        # Development server
         serve)
             init_phpvm
-            cmd_serve
+            cmd_serve "$@"
             ;;
         worker)
             init_phpvm
@@ -151,28 +146,6 @@ main() {
             cmd_tail "$@"
             ;;
 
-        # Framework-specific pass-through
-        artisan)
-            init_phpvm
-            run_artisan "$@"
-            ;;
-        console)
-            init_phpvm
-            run_console "$@"
-            ;;
-        yii)
-            init_phpvm
-            run_yii "$@"
-            ;;
-        horizon)
-            init_phpvm
-            run_horizon_cmd
-            ;;
-        octane)
-            init_phpvm
-            run_octane_cmd "$@"
-            ;;
-
         # Tab completion
         completion)
             cmd_completion "$@"
@@ -188,71 +161,6 @@ main() {
             show_help
             ;;
     esac
-}
-
-# Framework command runners
-run_artisan() {
-    if [[ ! -f "artisan" ]]; then
-        error "Not in a Laravel project directory"
-        return 1
-    fi
-    local php_bin
-    php_bin=$(get_php_binary)
-    exec "$php_bin" artisan "$@"
-}
-
-run_console() {
-    if [[ ! -f "bin/console" ]]; then
-        error "Not in a Symfony project directory"
-        return 1
-    fi
-    local php_bin
-    php_bin=$(get_php_binary)
-    exec "$php_bin" bin/console "$@"
-}
-
-run_yii() {
-    if [[ ! -f "yii" ]]; then
-        error "Not in a Yii project directory"
-        return 1
-    fi
-    local php_bin
-    php_bin=$(get_php_binary)
-    exec "$php_bin" yii "$@"
-}
-
-run_horizon_cmd() {
-    if [[ ! -f "artisan" ]]; then
-        error "Not in a Laravel project directory"
-        return 1
-    fi
-    if ! has_horizon; then
-        error "Laravel Horizon is not installed"
-        echo "Install with: composer require laravel/horizon"
-        return 1
-    fi
-    local php_bin
-    php_bin=$(get_php_binary)
-    exec "$php_bin" artisan horizon
-}
-
-run_octane_cmd() {
-    if [[ ! -f "artisan" ]]; then
-        error "Not in a Laravel project directory"
-        return 1
-    fi
-    if ! has_octane; then
-        error "Laravel Octane is not installed"
-        echo "Install with: composer require laravel/octane"
-        return 1
-    fi
-    local php_bin
-    php_bin=$(get_php_binary)
-    if [[ $# -eq 0 ]]; then
-        exec "$php_bin" artisan octane:start
-    else
-        exec "$php_bin" artisan "octane:$1" "${@:2}"
-    fi
 }
 
 main "$@"

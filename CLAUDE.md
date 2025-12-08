@@ -55,20 +55,19 @@ phpvm/
 - `php self-update` - Update PHPVM
 - `php help` - Show help
 
-## Framework Commands (in project directory)
+## Development Commands
 
-- `php artisan [cmd]` - Laravel artisan
-- `php console [cmd]` - Symfony console
-- `php yii [cmd]` - Yii command
-- `php horizon` - Laravel Horizon
-- `php octane [cmd]` - Laravel Octane
+- `php serve` - Start development server (auto-detect framework)
+- `php serve --port 3000` - Custom port
+- `php serve --host 127.0.0.1` - Custom host
+- `php serve --dir public` - Custom document root
 
 ## Version Resolution Order
 
 1. `PHPVERSION_USE` env var (session)
 2. `.phpversion` file (local)
-3. `~/.phpversion/config` (user)
-4. `/etc/phpversion` (system)
+3. `~/.phpvm/version` (user)
+4. `/etc/phpvm/version` (system)
 5. First installed (fallback)
 
 ## Supported Platforms
