@@ -1,5 +1,9 @@
 # PHPVM - PHP Version Manager
 
+[![Latest Version](https://img.shields.io/github/release/professor93/phpvm.svg?style=flat-square)](https://github.com/professor93/phpvm/releases)
+[![Software License](https://img.shields.io/badge/license-MIT-brightgreen.svg?style=flat-square)](LICENSE)
+[![Total Downloads](https://img.shields.io/github/downloads/professor93/phpvm/total.svg?style=flat-square&label=downloads)](https://github.com/professor93/phpvm/releases)
+
 A shell-based PHP version manager for Linux with interactive TUI using [gum](https://github.com/charmbracelet/gum).
 
 ## Features
