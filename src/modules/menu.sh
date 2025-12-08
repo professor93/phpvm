@@ -150,54 +150,133 @@ print_menu_header() {
     echo ""
 }
 
-# Show interactive menu using gum choose
+# Show interactive menu with hotkey support
 show_interactive_menu() {
     local framework="$1"
 
-    # Build menu options
-    local options=()
+    # Menu items (only selectable items, borders handled separately)
+    local items=(
+        "[u] Switch PHP version"
+        "[i] Install PHP/extension"
+        "[l] List installed versions"
+        "[c] Edit PHP configuration"
+        "[f] Manage PHP-FPM"
+        "[n] Nginx management"
+        "[s] Start dev server"
+        "[g] Log viewer"
+        "[o] Show PHP info"
+        "[?] Help"
+        "[q] Quit"
+    )
 
-    # Section: Version Management
-    options+=("─── Version Management ───")
-    options+=("[u] Switch PHP version")
-    options+=("[i] Install PHP/extension")
-    options+=("[l] List installed versions")
+    # Group boundaries for visual display
+    local group1_end=3   # Version items (0-2)
+    local group2_end=6   # Configuration items (3-5)
+    local group3_end=8   # Development items (6-7)
+    # group4 is Other items (8-10)
 
-    # Section: Configuration
-    options+=("─── Configuration ───")
-    options+=("[c] Edit PHP configuration")
-    options+=("[f] Manage PHP-FPM")
-    options+=("[n] Nginx management")
+    local current=0
+    local total=${#items[@]}
 
-    # Section: Development
-    options+=("─── Development ───")
-    options+=("[s] Start dev server")
-    options+=("[g] Log viewer")
+    # Hide cursor
+    tput civis 2>/dev/null || true
 
-    # Section: Other
-    options+=("─── Other ───")
-    options+=("[o] Show PHP info")
-    options+=("[?] Help")
-    options+=("[q] Quit")
+    # Cleanup on exit
+    trap 'tput cnorm 2>/dev/null || true' RETURN
 
-    # Use gum choose with arrow key navigation
-    printf '%s\n' "${options[@]}" | gum choose \
-        --header "Use ↑↓ arrows to navigate, Enter to select, or press hotkey" \
-        --header.foreground 241 \
-        --cursor "▸ " \
-        --cursor.foreground 212 \
-        --selected.foreground 212 \
-        --height 18
+    while true; do
+        # Move cursor to start of menu area
+        tput cup 9 0 2>/dev/null || echo -en "\033[9;0H"
+
+        # Print menu with groups
+        echo "  ${DIM}Use ↑↓ arrows or hotkeys, Enter to select${RESET}"
+        echo ""
+
+        # Group 1: Version
+        echo "  ${DIM}┌─ Version ─────────────┐${RESET}"
+        for i in 0 1 2; do
+            print_menu_line "$i" "$current" "${items[$i]}"
+        done
+
+        # Group 2: Configuration
+        echo "  ${DIM}├─ Configuration ───────┤${RESET}"
+        for i in 3 4 5; do
+            print_menu_line "$i" "$current" "${items[$i]}"
+        done
+
+        # Group 3: Development
+        echo "  ${DIM}├─ Development ─────────┤${RESET}"
+        for i in 6 7; do
+            print_menu_line "$i" "$current" "${items[$i]}"
+        done
+
+        # Group 4: Other
+        echo "  ${DIM}├─ Other ───────────────┤${RESET}"
+        for i in 8 9 10; do
+            print_menu_line "$i" "$current" "${items[$i]}"
+        done
+        echo "  ${DIM}└───────────────────────┘${RESET}"
+
+        # Read single keypress
+        local key
+        IFS= read -rsn1 key
+
+        # Handle escape sequences (arrow keys)
+        if [[ "$key" == $'\x1b' ]]; then
+            read -rsn2 -t 0.1 key
+            case "$key" in
+                '[A') # Up arrow
+                    ((current > 0)) && ((current--))
+                    ;;
+                '[B') # Down arrow
+                    ((current < total - 1)) && ((current++))
+                    ;;
+            esac
+            continue
+        fi
+
+        # Handle Enter key
+        if [[ "$key" == "" ]]; then
+            echo "${items[$current]}"
+            return
+        fi
+
+        # Handle hotkeys
+        case "$key" in
+            u) echo "[u] Switch PHP version"; return ;;
+            i) echo "[i] Install PHP/extension"; return ;;
+            l) echo "[l] List installed versions"; return ;;
+            c) echo "[c] Edit PHP configuration"; return ;;
+            f) echo "[f] Manage PHP-FPM"; return ;;
+            n) echo "[n] Nginx management"; return ;;
+            s) echo "[s] Start dev server"; return ;;
+            g) echo "[g] Log viewer"; return ;;
+            o) echo "[o] Show PHP info"; return ;;
+            '?') echo "[?] Help"; return ;;
+            q) echo "[q] Quit"; return ;;
+            # Vim-style navigation
+            k) ((current > 0)) && ((current--)) ;;
+            j) ((current < total - 1)) && ((current++)) ;;
+        esac
+    done
+}
+
+# Print a single menu line with highlighting
+print_menu_line() {
+    local index="$1"
+    local current="$2"
+    local text="$3"
+
+    if [[ "$index" -eq "$current" ]]; then
+        echo "  ${MAGENTA}▸ ${text}${RESET}"
+    else
+        echo "    ${text}"
+    fi
 }
 
 # Execute menu item
 execute_menu_item() {
     local selected="$1"
-
-    # Skip section headers
-    if [[ "$selected" == "───"* ]]; then
-        return 0
-    fi
 
     clear
 
@@ -232,6 +311,7 @@ execute_menu_item() {
             ;;
         "[g] Log viewer")
             cmd_logs
+            wait_for_key
             ;;
         "[o] Show PHP info")
             cmd_info

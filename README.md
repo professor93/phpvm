@@ -94,7 +94,7 @@ Launch with `php menu` for a full-featured dashboard with arrow key navigation:
 
 ```
 ╔═════════════════════════════════════╗
-║      PHPVM Dashboard v1.2.0         ║
+║      PHPVM Dashboard v1.2.1         ║
 ║      PHP 8.4.1 | Laravel v11.0      ║
 ║      nginx ●  fpm ●                 ║
 ╚═════════════════════════════════════╝

@@ -49,8 +49,7 @@ ${BOLD}Information:${RESET}
 ${BOLD}Configuration:${RESET}
   config              Edit PHP configuration files
   fpm                 Manage PHP-FPM services and pools
-  nginx               Manage nginx (info/reload/generate/processes)
-  nginx generate      Generate nginx config from template
+  nginx               Manage nginx (interactive menu)
 
 ${BOLD}Logs:${RESET}
   logs                Interactive log viewer (with gum)

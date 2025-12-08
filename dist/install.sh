@@ -2,13 +2,17 @@
 # PHPVM Installer
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/professor93/phpvm/main/install.sh | bash
-#   Or: sudo bash install.sh  (for system-wide)
+#   Or run as root for system-wide installation
 
 set -o pipefail
 
-PHPVM_VERSION="1.2.0"
+PHPVM_VERSION="1.2.1"
 PHPVM_REPO="professor93/phpvm"
 PHPVM_RAW_URL="https://raw.githubusercontent.com/${PHPVM_REPO}/main"
+
+# Sudo helper - use sudo only if not already root
+SUDO=""
+[[ $EUID -ne 0 ]] && SUDO="sudo"
 
 # Colors
 setup_colors() {
@@ -170,17 +174,17 @@ install_gum() {
 
     case "$filename" in
         *.deb)
-            sudo dpkg -i "${tmp_dir}/${filename}" &>/dev/null
+            $SUDO dpkg -i "${tmp_dir}/${filename}" &>/dev/null
             ;;
         *.rpm)
-            sudo rpm -i "${tmp_dir}/${filename}" &>/dev/null
+            $SUDO rpm -i "${tmp_dir}/${filename}" &>/dev/null
             ;;
         *.tar.gz)
             tar -xzf "${tmp_dir}/${filename}" -C "$tmp_dir"
             local gum_bin=$(find "$tmp_dir" -name "gum" -type f -executable | head -1)
             if [[ -n "$gum_bin" ]]; then
                 if [[ "$INSTALL_MODE" == "system" || $EUID -eq 0 ]]; then
-                    sudo install -m 755 "$gum_bin" /usr/local/bin/gum
+                    $SUDO install -m 755 "$gum_bin" /usr/local/bin/gum
                 else
                     mkdir -p "$HOME/.local/bin"
                     install -m 755 "$gum_bin" "$HOME/.local/bin/gum"
@@ -243,7 +247,7 @@ check_existing_php() {
         msg "Backing up $target_php to ${target_php}.backup..."
 
         if [[ "$INSTALL_MODE" == "system" ]]; then
-            sudo mv "$target_php" "${target_php}.backup"
+            $SUDO mv "$target_php" "${target_php}.backup"
         else
             mv "$target_php" "${target_php}.backup"
         fi
@@ -283,7 +287,7 @@ select_install_mode() {
         fi
     else
         INSTALL_MODE="user"
-        msg "Installing for current user (use sudo for system-wide)"
+        msg "Installing for current user (run as root for system-wide)"
     fi
 }
 
@@ -293,13 +297,13 @@ do_uninstall() {
 
     # System-wide
     if is_phpvm_binary "/usr/local/bin/php"; then
-        sudo rm -f /usr/local/bin/php /usr/local/bin/composer
-        sudo rm -f /etc/profile.d/phpvm.sh
-        sudo rm -rf /etc/phpvm
+        $SUDO rm -f /usr/local/bin/php /usr/local/bin/composer
+        $SUDO rm -f /etc/profile.d/phpvm.sh
+        $SUDO rm -rf /etc/phpvm
 
         if [[ -f "/usr/local/bin/php.backup" ]]; then
             if ui_confirm "Restore backed up PHP?"; then
-                sudo mv /usr/local/bin/php.backup /usr/local/bin/php
+                $SUDO mv /usr/local/bin/php.backup /usr/local/bin/php
                 success "Restored backup PHP"
             fi
         fi
@@ -389,9 +393,9 @@ do_install() {
     msg "Installing to $bin_dir..."
 
     if [[ "$INSTALL_MODE" == "system" ]]; then
-        sudo install -m 755 "${tmp_dir}/php" "$bin_dir/php"
-        sudo install -m 755 "${tmp_dir}/composer" "$bin_dir/composer"
-        sudo install -m 644 "${tmp_dir}/env.sh" "$env_file"
+        $SUDO install -m 755 "${tmp_dir}/php" "$bin_dir/php"
+        $SUDO install -m 755 "${tmp_dir}/composer" "$bin_dir/composer"
+        $SUDO install -m 644 "${tmp_dir}/env.sh" "$env_file"
     else
         install -m 755 "${tmp_dir}/php" "$bin_dir/php"
         install -m 755 "${tmp_dir}/composer" "$bin_dir/composer"
@@ -426,26 +430,23 @@ do_install() {
     # Create user directory
     mkdir -p "$HOME/.phpvm"
 
+    # Source the environment file to make phpvm available immediately
+    source "$env_file" 2>/dev/null || true
+
     success "PHPVM installed successfully!"
     echo ""
     echo "${BOLD}Next steps:${RESET}"
     echo ""
-    echo "  1. Restart your shell or run:"
-    if [[ "$INSTALL_MODE" == "system" ]]; then
-        echo "     ${CYAN}source /etc/profile.d/phpvm.sh${RESET}"
-    else
-        echo "     ${CYAN}source $env_file${RESET}"
-    fi
-    echo ""
-    echo "  2. Install PHP:"
+    echo "  1. Install PHP:"
     echo "     ${CYAN}php install${RESET}"
     echo ""
-    echo "  3. Show help:"
+    echo "  2. Show help:"
     echo "     ${CYAN}php help${RESET}"
     echo ""
 
     echo "${DIM}Note: PHPVM is installed to $bin_dir which takes precedence over /usr/bin."
-    echo "      Running 'apt install php' will not overwrite PHPVM.${RESET}"
+    echo "      Running 'apt install php' will not overwrite PHPVM."
+    echo "      Open a new terminal if 'php' command is not found.${RESET}"
     echo ""
 }
 

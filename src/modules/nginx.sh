@@ -1,6 +1,224 @@
 # nginx.sh - Advanced Nginx Configuration Management
 # PHP Version Manager (PHPVM)
 
+# ============================================
+# Nginx Installation
+# ============================================
+
+# Check if nginx is installed
+nginx_is_installed() {
+    command_exists nginx
+}
+
+# Get nginx version
+nginx_get_version() {
+    nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+'
+}
+
+# Check if nginx official repo is configured
+nginx_repo_configured() {
+    local pm=$(get_package_manager)
+
+    case "$pm" in
+        apt)
+            [[ -f /etc/apt/sources.list.d/nginx.list ]] || \
+            grep -rq "nginx.org" /etc/apt/sources.list.d/ 2>/dev/null
+            ;;
+        dnf|yum)
+            [[ -f /etc/yum.repos.d/nginx.repo ]]
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# Setup nginx official repository
+nginx_setup_repo() {
+    local pm=$(get_package_manager)
+
+    info_log "Setting up official nginx repository..."
+
+    case "$pm" in
+        apt)
+            # Install prerequisites (suppress tmpfiles warnings in containers)
+            run_privileged apt-get update -qq 2>/dev/null
+            run_privileged apt-get install -y curl gnupg2 ca-certificates lsb-release 2>&1 | grep -v "tmpfiles.d" || true
+
+            # Add nginx signing key
+            curl -fsSL https://nginx.org/keys/nginx_signing.key | \
+                run_privileged gpg --dearmor -o /usr/share/keyrings/nginx-archive-keyring.gpg 2>/dev/null
+
+            # Detect codename
+            local codename
+            if [[ -f /etc/os-release ]]; then
+                . /etc/os-release
+                case "$ID" in
+                    ubuntu) codename="${UBUNTU_CODENAME:-$(lsb_release -cs 2>/dev/null || echo 'jammy')}" ;;
+                    debian) codename="${VERSION_CODENAME:-$(lsb_release -cs 2>/dev/null || echo 'bookworm')}" ;;
+                    *) codename="jammy" ;;
+                esac
+            else
+                codename="jammy"
+            fi
+
+            # Add repository
+            echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/mainline/${ID:-ubuntu} $codename nginx" | \
+                run_privileged tee /etc/apt/sources.list.d/nginx.list > /dev/null
+
+            # Pin nginx packages from official repo
+            run_privileged tee /etc/apt/preferences.d/99nginx > /dev/null <<EOF
+Package: *
+Pin: origin nginx.org
+Pin: release o=nginx
+Pin-Priority: 900
+EOF
+
+            run_privileged apt-get update -qq
+            success "Nginx official repository configured"
+            ;;
+        dnf|yum)
+            # Detect OS version
+            local releasever
+            if [[ -f /etc/os-release ]]; then
+                . /etc/os-release
+                releasever="${VERSION_ID%%.*}"
+            else
+                releasever="8"
+            fi
+
+            # Create nginx repo file
+            run_privileged tee /etc/yum.repos.d/nginx.repo > /dev/null <<EOF
+[nginx-stable]
+name=nginx stable repo
+baseurl=http://nginx.org/packages/centos/$releasever/\$basearch/
+gpgcheck=1
+enabled=1
+gpgkey=https://nginx.org/keys/nginx_signing.key
+module_hotfixes=true
+
+[nginx-mainline]
+name=nginx mainline repo
+baseurl=http://nginx.org/packages/mainline/centos/$releasever/\$basearch/
+gpgcheck=1
+enabled=0
+gpgkey=https://nginx.org/keys/nginx_signing.key
+module_hotfixes=true
+EOF
+            success "Nginx official repository configured"
+            ;;
+        *)
+            error "Unsupported package manager for nginx repository setup"
+            return 1
+            ;;
+    esac
+}
+
+# Install nginx from official repository
+nginx_install() {
+    local pm=$(get_package_manager)
+
+    if nginx_is_installed; then
+        local version
+        version=$(nginx_get_version)
+        warn "Nginx is already installed (v${version})"
+
+        if ! gum_confirm "Reinstall/upgrade nginx?"; then
+            return 0
+        fi
+    fi
+
+    # Setup official repo if not configured
+    if ! nginx_repo_configured; then
+        if gum_confirm "Setup official nginx repository? (recommended for latest version)"; then
+            nginx_setup_repo || return 1
+        fi
+    fi
+
+    info_log "Installing nginx..."
+
+    case "$pm" in
+        apt)
+            # Suppress tmpfiles warnings in containers
+            run_privileged apt-get install -y nginx 2>&1 | grep -v "tmpfiles.d" || true
+            ;;
+        dnf)
+            run_privileged dnf install -y nginx 2>&1 | grep -v "tmpfiles.d" || true
+            ;;
+        yum)
+            run_privileged yum install -y nginx 2>&1 | grep -v "tmpfiles.d" || true
+            ;;
+        *)
+            error "Unsupported package manager: $pm"
+            return 1
+            ;;
+    esac
+
+    if nginx_is_installed; then
+        local version
+        version=$(nginx_get_version)
+        success "Nginx installed (v${version})"
+
+        # Enable and start nginx
+        if gum_confirm "Start nginx now?"; then
+            run_privileged systemctl enable nginx 2>/dev/null || true
+            run_privileged systemctl start nginx
+            success "Nginx started"
+        fi
+        return 0
+    else
+        error "Nginx installation failed"
+        return 1
+    fi
+}
+
+# Uninstall nginx
+nginx_uninstall() {
+    if ! nginx_is_installed; then
+        warn "Nginx is not installed"
+        return 0
+    fi
+
+    if ! gum_confirm "Uninstall nginx?" "no"; then
+        return 0
+    fi
+
+    local pm=$(get_package_manager)
+
+    # Stop service first
+    run_privileged systemctl stop nginx 2>/dev/null || true
+    run_privileged systemctl disable nginx 2>/dev/null || true
+
+    case "$pm" in
+        apt)
+            if gum_confirm "Remove configuration files too?" "no"; then
+                run_privileged apt-get purge -y nginx nginx-common
+            else
+                run_privileged apt-get remove -y nginx
+            fi
+            run_privileged apt-get autoremove -y
+            ;;
+        dnf|yum)
+            run_privileged $pm remove -y nginx
+            ;;
+    esac
+
+    success "Nginx uninstalled"
+}
+
+# Prompt to install nginx if not installed
+nginx_ensure_installed() {
+    if ! nginx_is_installed; then
+        warn "Nginx is not installed"
+        if gum_confirm "Install nginx from official repository?"; then
+            nginx_install || return 1
+        else
+            return 1
+        fi
+    fi
+    return 0
+}
+
 # Common nginx config locations
 NGINX_CONF_DIRS=(
     "/etc/nginx/sites-enabled"
@@ -1282,89 +1500,36 @@ view_nginx_config() {
 # ============================================
 
 cmd_nginx() {
-    local subcommand="${1:-}"
-    shift 2>/dev/null || true
-
-    # If no subcommand and gum available, show interactive menu
-    if [[ -z "$subcommand" && "$UI_MODE" == "gum" ]]; then
-        interactive_nginx_menu
-        return
-    fi
-
-    case "$subcommand" in
-        ""|info|status)
-            show_nginx_info
-            ;;
-        reload)
-            if gum_confirm "Reload nginx configuration?"; then
-                nginx_reload
-            fi
-            ;;
-        restart)
-            if gum_confirm "Restart nginx service?"; then
-                nginx_restart
-            fi
-            ;;
-        config|view)
-            view_nginx_config
-            ;;
-        edit)
-            local config_file
-            config_file=$(select_nginx_config)
-            [[ -n "$config_file" ]] && run_privileged "${EDITOR:-nano}" "$config_file"
-            ;;
-        test)
-            info_log "Testing nginx configuration..."
-            run_privileged nginx -t
-            ;;
-        generate|create|new)
-            generate_nginx_config
-            ;;
-        processes|ps)
-            show_backend_processes
-            ;;
-        templates)
-            local template_cmd="${1:-list}"
-            case "$template_cmd" in
-                list) list_custom_templates ;;
-                add|new|create) add_custom_template ;;
-                edit) edit_custom_template ;;
-                delete|remove) delete_custom_template ;;
-                *)
-                    echo "Usage: php nginx templates [command]"
-                    echo "Commands: list, add, edit, delete"
-                    ;;
-            esac
-            ;;
-        *)
-            echo "Usage: php nginx [command]"
-            echo ""
-            echo "Commands:"
-            echo "  info        Show nginx configuration info (default)"
-            echo "  status      Same as info"
-            echo "  reload      Reload nginx configuration"
-            echo "  restart     Restart nginx service"
-            echo "  config      View nginx configuration (with selection)"
-            echo "  edit        Edit nginx configuration"
-            echo "  test        Test nginx configuration"
-            echo "  generate    Generate new nginx configuration"
-            echo "  processes   Show running backend processes"
-            echo "  templates   Manage custom templates"
-            echo ""
-            echo "Template commands:"
-            echo "  php nginx templates list    List custom templates"
-            echo "  php nginx templates add     Add custom template"
-            echo "  php nginx templates edit    Edit custom template"
-            echo "  php nginx templates delete  Delete custom template"
-            ;;
-    esac
+    # Always show interactive menu
+    interactive_nginx_menu
 }
 
 # Interactive nginx menu
 interactive_nginx_menu() {
+    # Check if nginx is installed first
+    if ! nginx_is_installed; then
+        echo ""
+        warn "Nginx is not installed"
+        echo ""
+        if gum_confirm "Install nginx from official repository?"; then
+            nginx_install
+        fi
+        return
+    fi
+
     while true; do
         clear
-        echo "${BOLD}Nginx Management${RESET}"
+
+        # Show nginx status header
+        local version status_text
+        version=$(nginx_get_version)
+        if systemctl is-active nginx &>/dev/null 2>&1; then
+            status_text="${GREEN}running${RESET}"
+        else
+            status_text="${RED}stopped${RESET}"
+        fi
+
+        echo "${BOLD}Nginx v${version}${RESET} - ${status_text}"
         echo ""
 
         local choice
@@ -1373,11 +1538,11 @@ interactive_nginx_menu() {
             "View Configuration" \
             "Edit Configuration" \
             "Generate New Config" \
-            "Reload Nginx" \
-            "Restart Nginx" \
+            "Service Control" \
             "Test Configuration" \
             "Show Backend Processes" \
             "Manage Templates" \
+            "Uninstall Nginx" \
             "Back")
 
         case "$choice" in
@@ -1397,17 +1562,25 @@ interactive_nginx_menu() {
                 generate_nginx_config
                 read -rp "Press Enter to continue..."
                 ;;
-            "Reload Nginx")
-                if gum_confirm "Reload nginx configuration?"; then
-                    nginx_reload
-                fi
-                read -rp "Press Enter to continue..."
-                ;;
-            "Restart Nginx")
-                if gum_confirm "Restart nginx service?"; then
-                    nginx_restart
-                fi
-                read -rp "Press Enter to continue..."
+            "Service Control")
+                local svc_action
+                svc_action=$(gum choose \
+                    "Start" \
+                    "Stop" \
+                    "Restart" \
+                    "Reload" \
+                    "Enable on boot" \
+                    "Disable on boot" \
+                    "Back")
+                case "$svc_action" in
+                    "Start") run_privileged systemctl start nginx && success "Nginx started" ;;
+                    "Stop") run_privileged systemctl stop nginx && success "Nginx stopped" ;;
+                    "Restart") nginx_restart ;;
+                    "Reload") nginx_reload ;;
+                    "Enable on boot") run_privileged systemctl enable nginx && success "Nginx enabled" ;;
+                    "Disable on boot") run_privileged systemctl disable nginx && success "Nginx disabled" ;;
+                esac
+                [[ "$svc_action" != "Back" && -n "$svc_action" ]] && read -rp "Press Enter to continue..."
                 ;;
             "Test Configuration")
                 run_privileged nginx -t
@@ -1419,6 +1592,11 @@ interactive_nginx_menu() {
                 ;;
             "Manage Templates")
                 manage_templates_menu
+                ;;
+            "Uninstall Nginx")
+                nginx_uninstall
+                [[ ! nginx_is_installed ]] && break
+                read -rp "Press Enter to continue..."
                 ;;
             "Back"|"")
                 break

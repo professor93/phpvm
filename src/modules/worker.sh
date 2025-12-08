@@ -4,17 +4,176 @@
 SUPERVISOR_CONF_DIR="/etc/supervisor/conf.d"
 PHPVM_WORKER_PREFIX="phpvm_worker_"
 
+# ============================================
+# Supervisor Installation
+# ============================================
+
 # Check if supervisor is installed
-check_supervisor() {
-    if ! command_exists supervisorctl; then
-        error "Supervisor is not installed"
-        echo ""
-        echo "Install with:"
-        echo "  Ubuntu/Debian: sudo apt install supervisor"
-        echo "  RHEL/CentOS:   sudo yum install supervisor"
+supervisor_is_installed() {
+    command_exists supervisorctl
+}
+
+# Get supervisor version
+supervisor_get_version() {
+    supervisorctl version 2>/dev/null || supervisord --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?'
+}
+
+# Install supervisor
+supervisor_install() {
+    local pm=$(get_package_manager)
+
+    if supervisor_is_installed; then
+        local version
+        version=$(supervisor_get_version)
+        warn "Supervisor is already installed (v${version})"
+
+        if ! gum_confirm "Reinstall/upgrade supervisor?"; then
+            return 0
+        fi
+    fi
+
+    info_log "Installing supervisor..."
+
+    case "$pm" in
+        apt)
+            run_privileged apt-get update -qq 2>/dev/null
+            # Suppress tmpfiles warnings in containers
+            run_privileged apt-get install -y supervisor 2>&1 | grep -v "tmpfiles.d" || true
+            ;;
+        dnf)
+            run_privileged dnf install -y supervisor 2>&1 | grep -v "tmpfiles.d" || true
+            ;;
+        yum)
+            run_privileged yum install -y supervisor 2>&1 | grep -v "tmpfiles.d" || true
+            ;;
+        *)
+            error "Unsupported package manager: $pm"
+            echo ""
+            echo "Please install supervisor manually:"
+            echo "  pip install supervisor"
+            return 1
+            ;;
+    esac
+
+    if supervisor_is_installed; then
+        local version
+        version=$(supervisor_get_version)
+        success "Supervisor installed (v${version})"
+
+        # Enable and start supervisor
+        if gum_confirm "Start supervisor now?"; then
+            run_privileged systemctl enable supervisor 2>/dev/null || \
+            run_privileged systemctl enable supervisord 2>/dev/null || true
+            run_privileged systemctl start supervisor 2>/dev/null || \
+            run_privileged systemctl start supervisord 2>/dev/null || true
+            success "Supervisor started"
+        fi
+        return 0
+    else
+        error "Supervisor installation failed"
         return 1
     fi
+}
+
+# Uninstall supervisor
+supervisor_uninstall() {
+    if ! supervisor_is_installed; then
+        warn "Supervisor is not installed"
+        return 0
+    fi
+
+    if ! gum_confirm "Uninstall supervisor?" "no"; then
+        return 0
+    fi
+
+    local pm=$(get_package_manager)
+
+    # Stop service first
+    run_privileged systemctl stop supervisor 2>/dev/null || \
+    run_privileged systemctl stop supervisord 2>/dev/null || true
+    run_privileged systemctl disable supervisor 2>/dev/null || \
+    run_privileged systemctl disable supervisord 2>/dev/null || true
+
+    case "$pm" in
+        apt)
+            if gum_confirm "Remove configuration files too?" "no"; then
+                run_privileged apt-get purge -y supervisor
+            else
+                run_privileged apt-get remove -y supervisor
+            fi
+            run_privileged apt-get autoremove -y
+            ;;
+        dnf|yum)
+            run_privileged $pm remove -y supervisor
+            ;;
+    esac
+
+    success "Supervisor uninstalled"
+}
+
+# Supervisor service control
+supervisor_service() {
+    local action="$1"
+
+    if ! supervisor_is_installed; then
+        error "Supervisor is not installed"
+        return 1
+    fi
+
+    # Try both service names (supervisor on Debian, supervisord on RHEL)
+    case "$action" in
+        start)
+            run_privileged systemctl start supervisor 2>/dev/null || \
+            run_privileged systemctl start supervisord 2>/dev/null && \
+            success "Supervisor started"
+            ;;
+        stop)
+            run_privileged systemctl stop supervisor 2>/dev/null || \
+            run_privileged systemctl stop supervisord 2>/dev/null && \
+            success "Supervisor stopped"
+            ;;
+        restart)
+            run_privileged systemctl restart supervisor 2>/dev/null || \
+            run_privileged systemctl restart supervisord 2>/dev/null && \
+            success "Supervisor restarted"
+            ;;
+        status)
+            systemctl status supervisor 2>/dev/null || \
+            systemctl status supervisord 2>/dev/null
+            ;;
+        enable)
+            run_privileged systemctl enable supervisor 2>/dev/null || \
+            run_privileged systemctl enable supervisord 2>/dev/null && \
+            success "Supervisor enabled"
+            ;;
+        disable)
+            run_privileged systemctl disable supervisor 2>/dev/null || \
+            run_privileged systemctl disable supervisord 2>/dev/null && \
+            success "Supervisor disabled"
+            ;;
+        *)
+            error "Unknown action: $action"
+            return 1
+            ;;
+    esac
+}
+
+# Prompt to install supervisor if not installed, returns 1 if user cancels
+supervisor_ensure_installed() {
+    if ! supervisor_is_installed; then
+        warn "Supervisor is not installed"
+        if gum_confirm "Install supervisor?"; then
+            supervisor_install || return 1
+        else
+            return 1
+        fi
+    fi
     return 0
+}
+
+# Legacy check function (now prompts for installation)
+check_supervisor() {
+    supervisor_ensure_installed
 }
 
 # Get supervisor config path for project

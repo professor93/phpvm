@@ -21,6 +21,7 @@ phpvm/
 │   │   ├── info.sh          # Info command
 │   │   ├── config_edit.sh   # Config viewing/editing
 │   │   ├── fpm.sh           # FPM management
+│   │   ├── nginx.sh         # Nginx installation and management
 │   │   ├── worker.sh        # Queue worker management (Supervisor)
 │   │   ├── cron.sh          # Crontab management
 │   │   ├── serve.sh         # Development server
@@ -48,6 +49,7 @@ phpvm/
 - `php menu` - Interactive dashboard
 - `php config` - View/edit configuration
 - `php fpm` - Manage PHP-FPM
+- `php nginx` - Manage nginx (install/config/service)
 - `php serve` - Start dev server (in project)
 - `php worker` - Manage queue workers (in project)
 - `php cron` - Manage cron jobs (in project)

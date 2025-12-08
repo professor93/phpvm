@@ -63,7 +63,7 @@ mkdir -p "$DIST_DIR"
 msg "Building php command..."
 {
     echo '#!/bin/bash'
-    echo '# PHP Version Manager (PHPVM) v1.2.0'
+    echo '# PHP Version Manager (PHPVM) v1.2.1'
     echo '# https://github.com/professor93/phpvm'
     echo '# This file is auto-generated. Do not edit directly.'
     echo ''
