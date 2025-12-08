@@ -1,5 +1,5 @@
 #!/bin/bash
-# PHP Version Manager (PHPVM) v1.2.1
+# PHP Version Manager (PHPVM) v1.2.2
 # https://github.com/professor93/phpvm
 # This file is auto-generated. Do not edit directly.
 
@@ -7,7 +7,7 @@ set -o pipefail
 
 # === config.sh ===
 
-PHPVM_VERSION="1.2.1"
+PHPVM_VERSION="1.2.2"
 PHPVM_REPO="professor93/phpvm"
 PHPVM_GITHUB_API="https://api.github.com/repos/${PHPVM_REPO}/releases/latest"
 PHPVM_RAW_URL="https://raw.githubusercontent.com/${PHPVM_REPO}/main"

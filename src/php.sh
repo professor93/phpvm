@@ -5,7 +5,7 @@
 set -o pipefail
 
 # Version (overridden by config.sh)
-PHPVM_VERSION="1.2.1"
+PHPVM_VERSION="1.2.2"
 
 # Source modules (will be inlined for distribution)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

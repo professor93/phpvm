@@ -3,27 +3,19 @@
 
 # Quick usage display (when calling `php` without arguments)
 show_quick_usage() {
-    local current_version
-    current_version=$(get_current_version)
-
     print_header
 
     cat <<EOF
 ${BOLD}Usage:${RESET} php [command] [options]
 
-${BOLD}Version Management:${RESET}
-  use [version]       Switch PHP version (interactive if no version)
+${BOLD}Commands:${RESET}
+  use [version]       Switch PHP version
   install [version]   Install PHP version or extension
-  list                List installed PHP versions
-  list extensions     List extensions for current PHP
-
-${BOLD}Quick Commands:${RESET}
+  list                List installed versions
   menu                Interactive dashboard
-  info                Show PHP and system info
   help                Show full help
 
-${BOLD}Pass-through:${RESET}
-  php [args]          Run PHP with arguments (e.g., php -v, php script.php)
+${DIM}Run 'php help' for all commands${RESET}
 EOF
 }
 

@@ -2,7 +2,7 @@
 # PHP Version Manager (PHPVM)
 
 # Tool version
-PHPVM_VERSION="1.2.1"
+PHPVM_VERSION="1.2.2"
 PHPVM_REPO="professor93/phpvm"
 PHPVM_GITHUB_API="https://api.github.com/repos/${PHPVM_REPO}/releases/latest"
 PHPVM_RAW_URL="https://raw.githubusercontent.com/${PHPVM_REPO}/main"
