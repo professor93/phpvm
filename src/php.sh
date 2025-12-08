@@ -4,8 +4,8 @@
 
 set -o pipefail
 
-# Version (overridden by config.sh)
-PHPVM_VERSION="1.2.2"
+# Version (replaced during build, overridden by config.sh in dev)
+PHPVM_VERSION="__VERSION__"
 
 # Source modules (will be inlined for distribution)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

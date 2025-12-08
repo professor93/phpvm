@@ -18,6 +18,24 @@ msg()     { echo "${GREEN}->${RESET} $*"; }
 success() { echo "${GREEN}[x]${RESET} $*"; }
 error()   { echo "${RED}x${RESET} $*" >&2; }
 
+# Get version from git tag or use "dev"
+get_version() {
+    local version
+    # Try to get version from git tag (e.g., v1.2.1 -> 1.2.1)
+    version=$(git describe --tags --exact-match 2>/dev/null | sed 's/^v//')
+    if [[ -z "$version" ]]; then
+        # Try to get latest tag + commits (e.g., v1.2.0-5-g1234567 -> 1.2.0-dev)
+        version=$(git describe --tags 2>/dev/null | sed 's/^v//' | sed 's/-[0-9]*-g.*$/-dev/')
+    fi
+    if [[ -z "$version" ]]; then
+        version="dev"
+    fi
+    echo "$version"
+}
+
+VERSION=$(get_version)
+msg "Version: ${BOLD}${VERSION}${RESET}"
+
 # List of modules to include
 MODULES=(
     "config.sh"
@@ -63,17 +81,17 @@ mkdir -p "$DIST_DIR"
 msg "Building php command..."
 {
     echo '#!/bin/bash'
-    echo '# PHP Version Manager (PHPVM) v1.2.2'
+    echo "# PHP Version Manager (PHPVM) v${VERSION}"
     echo '# https://github.com/professor93/phpvm'
     echo '# This file is auto-generated. Do not edit directly.'
     echo ''
     echo 'set -o pipefail'
     echo ''
 
-    # Include all modules
+    # Include all modules (replace __VERSION__ placeholder)
     for module in "${MODULES[@]}"; do
         echo "# === $module ==="
-        cat "$SRC_DIR/modules/$module" | grep -v '^#'
+        cat "$SRC_DIR/modules/$module" | grep -v '^#' | sed "s/__VERSION__/${VERSION}/g"
         echo ''
     done
 
@@ -319,10 +337,10 @@ msg "Building composer wrapper..."
     echo 'set -o pipefail'
     echo ''
 
-    # Include required modules
+    # Include required modules (replace __VERSION__ placeholder)
     for module in "${COMPOSER_MODULES[@]}"; do
         echo "# === $module ==="
-        cat "$SRC_DIR/modules/$module" | grep -v '^#'
+        cat "$SRC_DIR/modules/$module" | grep -v '^#' | sed "s/__VERSION__/${VERSION}/g"
         echo ''
     done
 
@@ -431,9 +449,9 @@ msg "Copying env.sh..."
 cp "$SRC_DIR/env.sh" "$DIST_DIR/env.sh"
 success "Built: dist/env.sh"
 
-# Copy install.sh
-msg "Copying install.sh..."
-cp "$SRC_DIR/install.sh" "$DIST_DIR/install.sh"
+# Copy install.sh (replace __VERSION__ placeholder)
+msg "Building install.sh..."
+sed "s/__VERSION__/${VERSION}/g" "$SRC_DIR/install.sh" > "$DIST_DIR/install.sh"
 chmod +x "$DIST_DIR/install.sh"
 success "Built: dist/install.sh"
 
