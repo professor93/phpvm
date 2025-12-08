@@ -1,0 +1,952 @@
+#!/bin/bash
+# Composer wrapper for PHP Version Manager
+# https://github.com/professor93/phpvm
+# This file is auto-generated. Do not edit directly.
+
+set -o pipefail
+
+# === config.sh ===
+
+PHPVM_VERSION="1.0.0"
+PHPVM_REPO="professor93/phpvm"
+PHPVM_GITHUB_API="https://api.github.com/repos/${PHPVM_REPO}/releases/latest"
+PHPVM_RAW_URL="https://raw.githubusercontent.com/${PHPVM_REPO}/main"
+
+GUM_GITHUB_REPO="charmbracelet/gum"
+GUM_MIN_VERSION="0.13.0"
+
+PHPVM_BIN_DIR="/usr/local/bin"
+PHPVM_ENV_FILE="/etc/profile.d/phpvm.sh"
+PHPVM_BIN_DIR_USER="$HOME/.local/bin"
+PHPVM_ENV_FILE_USER="$HOME/.config/phpvm/env.sh"
+
+PHPVM_DIR="$HOME/.phpversion"
+PHPVM_CONFIG="$PHPVM_DIR/config"
+SYSTEM_CONFIG="/etc/phpversion"
+
+SUPPORTED_VERSIONS=("8.5" "8.4" "8.3" "8.2" "8.1" "8.0" "7.4" "7.3" "7.2" "7.1" "7.0" "5.6")
+
+DEFAULT_EXTENSIONS=(
+    "cli" "common" "curl" "mbstring" "xml" "zip" "bcmath"
+    "ctype" "dom" "fileinfo" "pdo" "tokenizer" "filter" "session"
+)
+
+LOG_TIMESTAMPS=true  # Enable timestamps in verbose/log output
+LOG_FILE="$HOME/.phpversion/phpvm.log"
+
+# === colors.sh ===
+
+setup_colors() {
+    if [[ -t 1 ]]; then
+        RED=$(tput setaf 1 2>/dev/null || echo '')
+        GREEN=$(tput setaf 2 2>/dev/null || echo '')
+        YELLOW=$(tput setaf 3 2>/dev/null || echo '')
+        BLUE=$(tput setaf 4 2>/dev/null || echo '')
+        CYAN=$(tput setaf 6 2>/dev/null || echo '')
+        MAGENTA=$(tput setaf 5 2>/dev/null || echo '')
+        BOLD=$(tput bold 2>/dev/null || echo '')
+        DIM=$(tput dim 2>/dev/null || echo '')
+        RESET=$(tput sgr0 2>/dev/null || echo '')
+    else
+        RED="" GREEN="" YELLOW="" BLUE="" CYAN="" MAGENTA="" BOLD="" DIM="" RESET=""
+    fi
+}
+
+# === utils.sh ===
+
+timestamp() {
+    date "+%Y-%m-%d %H:%M:%S"
+}
+
+msg() {
+    echo "${GREEN}→${RESET} $*"
+}
+
+warn() {
+    echo "${YELLOW}⚠${RESET} $*"
+}
+
+error() {
+    echo "${RED}✗${RESET} $*" >&2
+}
+
+success() {
+    echo "${GREEN}✓${RESET} $*"
+}
+
+log() {
+    local level="$1"
+    shift
+    if [[ "$LOG_TIMESTAMPS" == "true" ]]; then
+        echo "[$(timestamp)] [$level] $*" >> "$LOG_FILE" 2>/dev/null
+    fi
+}
+
+info_log() {
+    local msg="$*"
+    if [[ "$LOG_TIMESTAMPS" == "true" ]]; then
+        echo "${DIM}[$(timestamp)]${RESET} ${CYAN}ℹ${RESET} $msg"
+    else
+        echo "${CYAN}ℹ${RESET} $msg"
+    fi
+    log "INFO" "$msg"
+}
+
+run_privileged() {
+    if [[ $EUID -eq 0 ]]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
+check_sudo() {
+    if [[ $EUID -ne 0 ]]; then
+        if ! sudo -v &>/dev/null; then
+            error "This operation requires sudo privileges"
+            exit 1
+        fi
+    fi
+}
+
+init_phpvm() {
+    mkdir -p "$PHPVM_DIR"
+    touch "$LOG_FILE" 2>/dev/null || true
+}
+
+command_exists() {
+    command -v "$1" &>/dev/null
+}
+
+version_gte() {
+    printf '%s\n%s\n' "$2" "$1" | sort -V -C
+}
+
+validate_version_format() {
+    local version="$1"
+    if [[ ! "$version" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        error "Invalid version format: $version"
+        echo "Version must be in format X.Y (e.g., 8.4)"
+        return 1
+    fi
+}
+
+is_supported_version() {
+    local version="$1"
+    for v in "${SUPPORTED_VERSIONS[@]}"; do
+        [[ "$v" == "$version" ]] && return 0
+    done
+    return 1
+}
+
+# === platform.sh ===
+
+detect_distro() {
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        DISTRO_ID="${ID:-unknown}"
+        DISTRO_ID_LIKE="${ID_LIKE:-}"
+        DISTRO_VERSION="${VERSION_ID:-}"
+        DISTRO_NAME="${PRETTY_NAME:-$ID}"
+    elif [[ -f /etc/redhat-release ]]; then
+        DISTRO_ID="rhel"
+        DISTRO_NAME=$(cat /etc/redhat-release)
+    elif [[ -f /etc/debian_version ]]; then
+        DISTRO_ID="debian"
+        DISTRO_NAME="Debian $(cat /etc/debian_version)"
+    else
+        DISTRO_ID="unknown"
+        DISTRO_NAME="Unknown Linux"
+    fi
+
+    # Detect WSL
+    IS_WSL=false
+    if grep -qi microsoft /proc/version 2>/dev/null; then
+        IS_WSL=true
+    fi
+}
+
+get_package_manager() {
+    case "$DISTRO_ID" in
+        ubuntu|debian|linuxmint|pop)
+            echo "apt"
+            ;;
+        fedora|rhel|centos|rocky|alma|ol)
+            if command_exists dnf; then
+                echo "dnf"
+            else
+                echo "yum"
+            fi
+            ;;
+        opensuse*|sles)
+            echo "zypper"
+            ;;
+        arch|manjaro)
+            echo "pacman"
+            ;;
+        *)
+            # Check by ID_LIKE
+            if [[ "$DISTRO_ID_LIKE" == *"debian"* ]] || [[ "$DISTRO_ID_LIKE" == *"ubuntu"* ]]; then
+                echo "apt"
+            elif [[ "$DISTRO_ID_LIKE" == *"rhel"* ]] || [[ "$DISTRO_ID_LIKE" == *"fedora"* ]]; then
+                command_exists dnf && echo "dnf" || echo "yum"
+            else
+                echo "unknown"
+            fi
+            ;;
+    esac
+}
+
+get_php_package_prefix() {
+    local pm=$(get_package_manager)
+    case "$pm" in
+        apt)
+            echo "php"  # php8.4, php8.4-cli, etc.
+            ;;
+        dnf|yum)
+            echo "php"  # php84, php84-cli, etc. (Remi format)
+            ;;
+        *)
+            echo "php"
+            ;;
+    esac
+}
+
+get_php_binary_path() {
+    local version="$1"
+    local pm=$(get_package_manager)
+
+    case "$pm" in
+        apt)
+            echo "/usr/bin/php${version}"
+            ;;
+        dnf|yum)
+            # Remi installs as php (managed by alternatives) or /usr/bin/phpXY
+            local v_nodot="${version//./}"
+            if [[ -x "/usr/bin/php${v_nodot}" ]]; then
+                echo "/usr/bin/php${v_nodot}"
+            elif [[ -x "/opt/remi/php${v_nodot}/root/usr/bin/php" ]]; then
+                echo "/opt/remi/php${v_nodot}/root/usr/bin/php"
+            else
+                echo "/usr/bin/php${version}"
+            fi
+            ;;
+        *)
+            echo "/usr/bin/php${version}"
+            ;;
+    esac
+}
+
+check_php_repository() {
+    local pm=$(get_package_manager)
+
+    case "$pm" in
+        apt)
+            # Check for Ondrej's PPA
+            if ls /etc/apt/sources.list.d/*ondrej* &>/dev/null || \
+               grep -r "ondrej/php" /etc/apt/sources.list.d/ &>/dev/null; then
+                return 0
+            fi
+            return 1
+            ;;
+        dnf|yum)
+            # Check for Remi repository
+            if [[ -f /etc/yum.repos.d/remi.repo ]] || \
+               [[ -f /etc/yum.repos.d/remi-php*.repo ]] || \
+               dnf repolist 2>/dev/null | grep -qi remi; then
+                return 0
+            fi
+            return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+setup_php_repository() {
+    local pm=$(get_package_manager)
+
+    info_log "Setting up PHP repository for $DISTRO_NAME..."
+
+    case "$pm" in
+        apt)
+            run_privileged apt-get update -qq
+            run_privileged apt-get install -y software-properties-common
+            run_privileged add-apt-repository -y ppa:ondrej/php
+            run_privileged apt-get update -qq
+            success "Ondrej's PHP PPA configured"
+            ;;
+        dnf)
+            # Fedora
+            if [[ "$DISTRO_ID" == "fedora" ]]; then
+                run_privileged dnf install -y "https://rpms.remirepo.net/fedora/remi-release-${DISTRO_VERSION}.rpm"
+            # RHEL/CentOS/Rocky/Alma
+            else
+                run_privileged dnf install -y epel-release
+                run_privileged dnf install -y "https://rpms.remirepo.net/enterprise/remi-release-${DISTRO_VERSION%%.*}.rpm"
+            fi
+            success "Remi repository configured"
+            ;;
+        yum)
+            run_privileged yum install -y epel-release
+            run_privileged yum install -y "https://rpms.remirepo.net/enterprise/remi-release-${DISTRO_VERSION%%.*}.rpm"
+            success "Remi repository configured"
+            ;;
+        *)
+            error "Unsupported package manager: $pm"
+            echo ""
+            echo "Please manually configure a PHP repository for your distribution."
+            echo ""
+            echo "Supported repositories:"
+            echo "  - Ubuntu/Debian: ppa:ondrej/php"
+            echo "  - RHEL/CentOS/Fedora: https://rpms.remirepo.net/"
+            return 1
+            ;;
+    esac
+}
+
+check_php_available() {
+    local version="$1"
+    local pm=$(get_package_manager)
+
+    case "$pm" in
+        apt)
+            apt-cache show "php${version}" &>/dev/null
+            ;;
+        dnf)
+            local v_nodot="${version//./}"
+            dnf info "php${v_nodot}" &>/dev/null 2>&1 || \
+            dnf info "php${v_nodot}-php-cli" &>/dev/null 2>&1
+            ;;
+        yum)
+            local v_nodot="${version//./}"
+            yum info "php${v_nodot}" &>/dev/null 2>&1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+install_php_package() {
+    local version="$1"
+    shift
+    local extensions=("$@")
+    local pm=$(get_package_manager)
+
+    case "$pm" in
+        apt)
+            local packages=("php${version}")
+            for ext in "${extensions[@]}"; do
+                packages+=("php${version}-${ext}")
+            done
+            run_privileged apt-get install -y "${packages[@]}"
+            ;;
+        dnf|yum)
+            local v_nodot="${version//./}"
+            # Enable Remi module for this PHP version
+            if [[ "$pm" == "dnf" ]]; then
+                run_privileged dnf module reset php -y 2>/dev/null || true
+                run_privileged dnf module enable "php:remi-${version}" -y 2>/dev/null || true
+            fi
+
+            local packages=("php${v_nodot}" "php${v_nodot}-php-cli")
+            for ext in "${extensions[@]}"; do
+                packages+=("php${v_nodot}-php-${ext}")
+            done
+            run_privileged $pm install -y "${packages[@]}"
+            ;;
+    esac
+}
+
+uninstall_php_package() {
+    local version="$1"
+    local pm=$(get_package_manager)
+
+    case "$pm" in
+        apt)
+            run_privileged apt-get remove -y "php${version}*"
+            run_privileged apt-get autoremove -y
+            ;;
+        dnf|yum)
+            local v_nodot="${version//./}"
+            run_privileged $pm remove -y "php${v_nodot}*"
+            ;;
+    esac
+}
+
+get_installed_versions_platform() {
+    local pm=$(get_package_manager)
+    local versions=()
+
+    case "$pm" in
+        apt)
+            # Check for /usr/bin/phpX.Y binaries
+            for v in "${SUPPORTED_VERSIONS[@]}"; do
+                [[ -x "/usr/bin/php${v}" ]] && versions+=("$v")
+            done
+            ;;
+        dnf|yum)
+            # Check for Remi PHP installations
+            for v in "${SUPPORTED_VERSIONS[@]}"; do
+                local v_nodot="${v//./}"
+                if [[ -x "/usr/bin/php${v_nodot}" ]] || \
+                   [[ -x "/opt/remi/php${v_nodot}/root/usr/bin/php" ]]; then
+                    versions+=("$v")
+                fi
+            done
+            ;;
+    esac
+
+    echo "${versions[@]}"
+}
+
+# === ui.sh ===
+
+check_gum() {
+    if ! command_exists gum; then
+        return 1
+    fi
+
+    local current_version
+    current_version=$(gum --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+
+    if [[ -z "$current_version" ]]; then
+        return 1
+    fi
+
+    version_gte "$current_version" "$GUM_MIN_VERSION"
+}
+
+install_gum_github() {
+    local arch
+    case "$(uname -m)" in
+        x86_64)  arch="amd64" ;;
+        aarch64) arch="arm64" ;;
+        armv7l)  arch="armv7" ;;
+        *)       return 1 ;;
+    esac
+
+    info_log "Installing gum from GitHub releases..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local latest_url="https://api.github.com/repos/${GUM_GITHUB_REPO}/releases/latest"
+
+    # Get latest release info
+    local download_url
+    download_url=$(curl -fsSL "$latest_url" | grep -oE "https://[^\"]+Linux_${arch}\.(tar\.gz|deb|rpm)" | head -1)
+
+    if [[ -z "$download_url" ]]; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    local filename="${download_url##*/}"
+
+    if ! curl -fsSL -o "${tmp_dir}/${filename}" "$download_url"; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    # Install based on file type
+    case "$filename" in
+        *.deb)
+            run_privileged dpkg -i "${tmp_dir}/${filename}"
+            ;;
+        *.rpm)
+            run_privileged rpm -i "${tmp_dir}/${filename}"
+            ;;
+        *.tar.gz)
+            tar -xzf "${tmp_dir}/${filename}" -C "$tmp_dir"
+            local gum_bin=$(find "$tmp_dir" -name "gum" -type f -executable | head -1)
+            if [[ -n "$gum_bin" ]]; then
+                run_privileged install -m 755 "$gum_bin" /usr/local/bin/gum
+            else
+                rm -rf "$tmp_dir"
+                return 1
+            fi
+            ;;
+    esac
+
+    rm -rf "$tmp_dir"
+
+    if check_gum; then
+        success "gum installed successfully"
+        return 0
+    fi
+    return 1
+}
+
+install_gum_package_manager() {
+    local pm=$(get_package_manager)
+
+    info_log "Installing gum from package manager..."
+
+    case "$pm" in
+        apt)
+            # Try to add charm repository
+            if ! grep -q "charm.sh" /etc/apt/sources.list.d/* 2>/dev/null; then
+                run_privileged mkdir -p /etc/apt/keyrings
+                curl -fsSL https://repo.charm.sh/apt/gpg.key | run_privileged gpg --dearmor -o /etc/apt/keyrings/charm.gpg
+                echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" | \
+                    run_privileged tee /etc/apt/sources.list.d/charm.list
+                run_privileged apt-get update -qq
+            fi
+            run_privileged apt-get install -y gum
+            ;;
+        dnf|yum)
+            # Try Charm's rpm repository
+            echo '[charm]
+name=Charm
+baseurl=https://repo.charm.sh/yum/
+enabled=1
+gpgcheck=1
+gpgkey=https://repo.charm.sh/yum/gpg.key' | run_privileged tee /etc/yum.repos.d/charm.repo
+            run_privileged $pm install -y gum
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    check_gum
+}
+
+ensure_gum() {
+    if check_gum; then
+        return 0
+    fi
+
+    warn "gum is not installed. Installing..."
+
+    # Try GitHub releases first
+    if install_gum_github; then
+        return 0
+    fi
+
+    warn "GitHub installation failed. Trying package manager..."
+
+    # Try package manager
+    if install_gum_package_manager; then
+        return 0
+    fi
+
+    warn "Could not install gum. Falling back to basic menu."
+    return 1
+}
+
+UI_MODE="gum"  # gum, fallback
+
+set_ui_mode() {
+    if check_gum; then
+        UI_MODE="gum"
+    else
+        UI_MODE="fallback"
+    fi
+}
+
+print_header() {
+    local current_version
+    current_version=$(get_current_version)
+
+    local header_text="PHP Version Manager v${PHPVM_VERSION}"
+    local status_text
+
+    if [[ -n "$current_version" ]]; then
+        status_text="Current: PHP ${current_version}"
+    else
+        status_text="No PHP installed"
+    fi
+
+    if [[ "$UI_MODE" == "gum" ]]; then
+        gum style \
+            --border rounded \
+            --border-foreground 212 \
+            --padding "0 2" \
+            --margin "1 0" \
+            "$header_text" \
+            "$status_text"
+    else
+        echo ""
+        echo "+-----------------------------------------------------------------+"
+        printf "| %-63s |\n" "$header_text"
+        printf "| %-63s |\n" "$status_text"
+        echo "+-----------------------------------------------------------------+"
+        echo ""
+    fi
+}
+
+gum_menu() {
+    local prompt="$1"
+    shift
+    local options=("$@")
+
+    if [[ "$UI_MODE" == "gum" ]]; then
+        printf '%s\n' "${options[@]}" | gum choose \
+            --header "$prompt" \
+            --cursor.foreground 212 \
+            --header.foreground 99 \
+            --selected.foreground 212
+    else
+        # Fallback: numbered menu
+        echo ""
+        echo "${CYAN}${prompt}${RESET}"
+        echo ""
+
+        local i=1
+        for opt in "${options[@]}"; do
+            echo "  ${YELLOW}${i})${RESET} $opt"
+            ((i++))
+        done
+        echo ""
+
+        local choice
+        read -rp "Enter number (1-${#options[@]}): " choice
+
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#options[@]} )); then
+            echo "${options[$((choice-1))]}"
+        else
+            echo ""
+        fi
+    fi
+}
+
+gum_multi_menu() {
+    local prompt="$1"
+    shift
+    local options=("$@")
+
+    if [[ "$UI_MODE" == "gum" ]]; then
+        printf '%s\n' "${options[@]}" | gum choose \
+            --no-limit \
+            --header "$prompt" \
+            --cursor.foreground 212 \
+            --header.foreground 99 \
+            --selected.foreground 212
+    else
+        # Fallback: comma-separated input
+        echo ""
+        echo "${CYAN}${prompt}${RESET}"
+        echo ""
+
+        local i=1
+        for opt in "${options[@]}"; do
+            echo "  ${YELLOW}${i})${RESET} $opt"
+            ((i++))
+        done
+        echo ""
+
+        local choices
+        read -rp "Enter numbers separated by comma (e.g., 1,3,5): " choices
+
+        IFS=',' read -ra selected <<< "$choices"
+        for num in "${selected[@]}"; do
+            num=$(echo "$num" | tr -d ' ')
+            if [[ "$num" =~ ^[0-9]+$ ]] && (( num >= 1 && num <= ${#options[@]} )); then
+                echo "${options[$((num-1))]}"
+            fi
+        done
+    fi
+}
+
+gum_confirm() {
+    local prompt="$1"
+    local default="${2:-yes}"  # yes or no
+
+    if [[ "$UI_MODE" == "gum" ]]; then
+        if [[ "$default" == "yes" ]]; then
+            gum confirm --default=yes "$prompt"
+        else
+            gum confirm --default=no "$prompt"
+        fi
+    else
+        local yn
+        if [[ "$default" == "yes" ]]; then
+            read -rp "${prompt} [Y/n]: " yn
+            yn="${yn:-y}"
+        else
+            read -rp "${prompt} [y/N]: " yn
+            yn="${yn:-n}"
+        fi
+
+        case "$yn" in
+            [Yy]*) return 0 ;;
+            *) return 1 ;;
+        esac
+    fi
+}
+
+gum_input() {
+    local prompt="$1"
+    local default="${2:-}"
+    local placeholder="${3:-}"
+
+    if [[ "$UI_MODE" == "gum" ]]; then
+        gum input \
+            --prompt "$prompt " \
+            --value "$default" \
+            --placeholder "$placeholder"
+    else
+        local input
+        if [[ -n "$default" ]]; then
+            read -rp "${prompt} [$default]: " input
+            echo "${input:-$default}"
+        else
+            read -rp "${prompt}: " input
+            echo "$input"
+        fi
+    fi
+}
+
+gum_spin() {
+    local title="$1"
+    shift
+
+    if [[ "$UI_MODE" == "gum" ]]; then
+        gum spin --spinner dot --title "$title" -- "$@"
+    else
+        echo "${CYAN}${title}...${RESET}"
+        "$@"
+    fi
+}
+
+gum_format() {
+    local text="$1"
+    local type="${2:-}"  # markdown, code, template
+
+    if [[ "$UI_MODE" == "gum" ]]; then
+        case "$type" in
+            markdown) echo "$text" | gum format ;;
+            code) echo "$text" | gum format -t code ;;
+            *) echo "$text" ;;
+        esac
+    else
+        echo "$text"
+    fi
+}
+
+# === version.sh ===
+
+get_installed_versions() {
+    get_installed_versions_platform
+}
+
+find_phpversion_file() {
+    local dir="$PWD"
+    local home_dir="$HOME"
+
+    while [[ "$dir" != "/" && "$dir" != "$home_dir" ]]; do
+        if [[ -f "${dir}/.phpversion" ]]; then
+            echo "${dir}/.phpversion"
+            return 0
+        fi
+        dir=$(dirname "$dir")
+    done
+
+    # Check home directory itself (but not root /)
+    if [[ -f "${home_dir}/.phpversion" && "$home_dir" != "/" ]]; then
+        echo "${home_dir}/.phpversion"
+        return 0
+    fi
+
+    return 1
+}
+
+find_phpversion_dir() {
+    local file
+    file=$(find_phpversion_file) || return 1
+    dirname "$file"
+}
+
+get_current_version() {
+    local version=""
+
+    # 1. PHPVERSION_USE env var (session)
+    if [[ -n "${PHPVERSION_USE:-}" ]]; then
+        version="$PHPVERSION_USE"
+    # 2. .phpversion file (local - searches up from $PWD)
+    elif local file; file=$(find_phpversion_file) 2>/dev/null; then
+        version=$(cat "$file" 2>/dev/null | tr -d '[:space:]')
+    # 3. ~/.phpversion/config (user default)
+    elif [[ -f "$PHPVM_CONFIG" ]]; then
+        version=$(cat "$PHPVM_CONFIG" 2>/dev/null | tr -d '[:space:]')
+    # 4. /etc/phpversion (system default)
+    elif [[ -f "$SYSTEM_CONFIG" ]]; then
+        version=$(cat "$SYSTEM_CONFIG" 2>/dev/null | tr -d '[:space:]')
+    # 5. First installed version (fallback)
+    else
+        local installed
+        installed=($(get_installed_versions))
+        if [[ ${#installed[@]} -gt 0 ]]; then
+            version="${installed[0]}"
+        fi
+    fi
+
+    # Validate the version is actually installed
+    if [[ -n "$version" ]]; then
+        local php_bin
+        php_bin=$(get_php_binary_path "$version")
+        if [[ -x "$php_bin" ]]; then
+            echo "$version"
+            return 0
+        fi
+    fi
+
+    # If configured version not installed, fall back to first installed
+    local installed
+    installed=($(get_installed_versions))
+    if [[ ${#installed[@]} -gt 0 ]]; then
+        echo "${installed[0]}"
+    fi
+}
+
+get_version_source() {
+    # 1. PHPVERSION_USE env var (session)
+    if [[ -n "${PHPVERSION_USE:-}" ]]; then
+        echo "session (PHPVERSION_USE=${PHPVERSION_USE})"
+        return
+    fi
+
+    # 2. .phpversion file (local)
+    local file
+    if file=$(find_phpversion_file) 2>/dev/null; then
+        echo "local (${file})"
+        return
+    fi
+
+    # 3. ~/.phpversion/config (user default)
+    if [[ -f "$PHPVM_CONFIG" ]]; then
+        echo "user (~/.phpversion/config)"
+        return
+    fi
+
+    # 4. /etc/phpversion (system default)
+    if [[ -f "$SYSTEM_CONFIG" ]]; then
+        echo "system (/etc/phpversion)"
+        return
+    fi
+
+    # 5. First installed version (fallback)
+    echo "fallback (first installed)"
+}
+
+get_php_binary() {
+    local version="${1:-$(get_current_version)}"
+
+    if [[ -z "$version" ]]; then
+        return 1
+    fi
+
+    local php_bin
+    php_bin=$(get_php_binary_path "$version")
+
+    if [[ -x "$php_bin" ]]; then
+        echo "$php_bin"
+        return 0
+    fi
+
+    return 1
+}
+
+get_full_php_version() {
+    local version="${1:-$(get_current_version)}"
+    local php_bin
+    php_bin=$(get_php_binary "$version") || return 1
+
+    "$php_bin" -r 'echo PHP_VERSION;' 2>/dev/null
+}
+
+install_composer() {
+    local version="$1"
+    local php_bin="$2"
+    local composer_dir="$3"
+
+    info_log "Installing Composer for PHP $version..."
+
+    mkdir -p "$composer_dir"
+
+    local tmp_file
+    tmp_file=$(mktemp)
+
+    # Download installer
+    if ! curl -fsSL https://getcomposer.org/installer -o "$tmp_file"; then
+        error "Failed to download Composer installer"
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    # Verify and install
+    if ! "$php_bin" "$tmp_file" --install-dir="$composer_dir" --filename="composer.phar"; then
+        error "Composer installation failed"
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    rm -f "$tmp_file"
+
+    # Create composer.json for global packages
+    if [[ ! -f "$composer_dir/composer.json" ]]; then
+        cat > "$composer_dir/composer.json" <<EOF
+{
+    "name": "phpvm/global",
+    "description": "Global Composer packages for PHP $version",
+    "type": "project",
+    "license": "MIT",
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
+EOF
+    fi
+
+    success "Composer installed for PHP $version"
+    return 0
+}
+
+main() {
+    setup_colors
+    detect_distro
+    set_ui_mode
+    init_phpvm
+
+    local version
+    version=$(get_current_version)
+
+    if [[ -z "$version" ]]; then
+        error "No PHP version installed"
+        echo "Run 'php install' to install PHP first"
+        exit 1
+    fi
+
+    local php_bin
+    php_bin=$(get_php_binary "$version")
+
+    if [[ -z "$php_bin" || ! -x "$php_bin" ]]; then
+        error "PHP $version binary not found"
+        exit 1
+    fi
+
+    local composer_dir="$PHPVM_DIR/$version/composer"
+    local composer_phar="$composer_dir/composer.phar"
+
+    # Install Composer if not present
+    if [[ ! -f "$composer_phar" ]]; then
+        warn "Composer not installed for PHP $version"
+
+        if ! gum_confirm "Would you like to install Composer now?"; then
+            exit 1
+        fi
+
+        install_composer "$version" "$php_bin" "$composer_dir" || exit 1
+    fi
+
+    # Set Composer environment
+    export COMPOSER_HOME="$composer_dir"
+    export PATH="$composer_dir/vendor/bin:$PATH"
+
+    # Run Composer
+    exec "$php_bin" "$composer_phar" "$@"
+}
+
+main "$@"

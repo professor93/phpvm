@@ -1,0 +1,68 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run build script
+        run: bash build.sh
+
+      - name: Verify build
+        run: |
+          bash -n dist/php
+          bash -n dist/composer
+          bash -n dist/env.sh
+          bash -n dist/install.sh
+
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Create release archive
+        run: |
+          mkdir -p release
+          cp dist/php release/
+          cp dist/composer release/
+          cp dist/env.sh release/
+          cp dist/install.sh release/
+          cd release
+          tar -czvf ../phpvm-${{ steps.version.outputs.VERSION }}.tar.gz *
+          cd ..
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            phpvm-${{ steps.version.outputs.VERSION }}.tar.gz
+            dist/install.sh
+          body: |
+            ## PHPVM v${{ steps.version.outputs.VERSION }}
+
+            ### Installation
+
+            ```bash
+            # Quick install (user-local)
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/dist/install.sh | bash
+
+            # System-wide install
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/dist/install.sh | sudo bash
+            ```
+
+            ### What's included
+            - `php` - Main PHPVM command
+            - `composer` - Per-version Composer wrapper
+            - `env.sh` - Shell environment for auto-switching
+            - `install.sh` - Installer script
+          draft: false
+          prerelease: false
