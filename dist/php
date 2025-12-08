@@ -1,5 +1,5 @@
 #!/bin/bash
-# PHP Version Manager (PHPVM) v1.0.0
+# PHP Version Manager (PHPVM) v1.1.0
 # https://github.com/professor93/phpvm
 # This file is auto-generated. Do not edit directly.
 
@@ -7,7 +7,7 @@ set -o pipefail
 
 # === config.sh ===
 
-PHPVM_VERSION="1.0.0"
+PHPVM_VERSION="1.1.0"
 PHPVM_REPO="professor93/phpvm"
 PHPVM_GITHUB_API="https://api.github.com/repos/${PHPVM_REPO}/releases/latest"
 PHPVM_RAW_URL="https://raw.githubusercontent.com/${PHPVM_REPO}/main"
@@ -27,8 +27,7 @@ SYSTEM_CONFIG="/etc/phpversion"
 SUPPORTED_VERSIONS=("8.5" "8.4" "8.3" "8.2" "8.1" "8.0" "7.4" "7.3" "7.2" "7.1" "7.0" "5.6")
 
 DEFAULT_EXTENSIONS=(
-    "cli" "common" "curl" "mbstring" "xml" "zip" "bcmath"
-    "ctype" "dom" "fileinfo" "pdo" "tokenizer" "filter" "session"
+    "curl" "mbstring" "xml" "zip" "bcmath" "intl" "pdo" "sqlite3" "opcache"
 )
 
 LOG_TIMESTAMPS=true  # Enable timestamps in verbose/log output
@@ -329,19 +328,14 @@ check_php_available() {
     esac
 }
 
-install_php_package() {
+install_php_base() {
     local version="$1"
-    shift
-    local extensions=("$@")
     local pm=$(get_package_manager)
 
     case "$pm" in
         apt)
-            local packages=("php${version}")
-            for ext in "${extensions[@]}"; do
-                packages+=("php${version}-${ext}")
-            done
-            run_privileged apt-get install -y "${packages[@]}"
+            # Install php-cli directly to avoid pulling in Apache
+            run_privileged apt-get install -y "php${version}-cli"
             ;;
         dnf|yum)
             local v_nodot="${version//./}"
@@ -350,12 +344,53 @@ install_php_package() {
                 run_privileged dnf module reset php -y 2>/dev/null || true
                 run_privileged dnf module enable "php:remi-${version}" -y 2>/dev/null || true
             fi
+            run_privileged $pm install -y "php${v_nodot}-php-cli"
+            ;;
+    esac
+}
 
-            local packages=("php${v_nodot}" "php${v_nodot}-php-cli")
-            for ext in "${extensions[@]}"; do
-                packages+=("php${v_nodot}-php-${ext}")
-            done
-            run_privileged $pm install -y "${packages[@]}"
+install_php_extension() {
+    local version="$1"
+    local ext="$2"
+    local pm=$(get_package_manager)
+
+    case "$pm" in
+        apt)
+            run_privileged apt-get install -y "php${version}-${ext}"
+            ;;
+        dnf|yum)
+            local v_nodot="${version//./}"
+            run_privileged $pm install -y "php${v_nodot}-php-${ext}"
+            ;;
+    esac
+}
+
+get_available_extensions() {
+    local version="$1"
+    local pm=$(get_package_manager)
+
+    case "$pm" in
+        apt)
+            apt-cache search "^php${version}-" 2>/dev/null | sed "s/php${version}-//" | cut -d' ' -f1 | sort
+            ;;
+        dnf|yum)
+            local v_nodot="${version//./}"
+            $pm list available "php${v_nodot}-php-*" 2>/dev/null | grep -v "^Last" | awk '{print $1}' | sed "s/php${v_nodot}-php-//" | cut -d'.' -f1 | sort -u
+            ;;
+    esac
+}
+
+get_installed_extensions() {
+    local version="$1"
+    local pm=$(get_package_manager)
+
+    case "$pm" in
+        apt)
+            dpkg -l "php${version}-*" 2>/dev/null | grep "^ii" | awk '{print $2}' | sed "s/:.*//; s/php${version}-//"
+            ;;
+        dnf|yum)
+            local v_nodot="${version//./}"
+            $pm list installed "php${v_nodot}-php-*" 2>/dev/null | grep -v "^Installed" | awk '{print $1}' | sed "s/php${v_nodot}-php-//" | cut -d'.' -f1
             ;;
     esac
 }
@@ -619,23 +654,64 @@ gum_multi_menu() {
     local options=("$@")
 
     if [[ "$UI_MODE" == "gum" ]]; then
-        printf '%s\n' "${options[@]}" | gum choose \
+        # Get terminal dimensions
+        local term_width term_height
+        term_width=$(tput cols 2>/dev/null || echo 80)
+        term_height=$(tput lines 2>/dev/null || echo 24)
+
+        # Calculate filter height (leave room for header and input)
+        local filter_height=$((term_height - 6))
+        [[ $filter_height -gt 30 ]] && filter_height=30
+        [[ $filter_height -lt 5 ]] && filter_height=5
+
+        # Use full terminal width
+        local filter_width=$((term_width - 2))
+        [[ $filter_width -lt 40 ]] && filter_width=40
+
+        printf '%s\n' "${options[@]}" | gum filter \
             --no-limit \
             --header "$prompt" \
-            --cursor.foreground 212 \
             --header.foreground 99 \
-            --selected.foreground 212
+            --indicator.foreground 212 \
+            --match.foreground 212 \
+            --height "$filter_height" \
+            --width "$filter_width" \
+            --placeholder "Type to filter, Tab to select, Enter to confirm"
     else
-        # Fallback: comma-separated input
+        # Fallback: multi-column display
         echo ""
         echo "${CYAN}${prompt}${RESET}"
         echo ""
 
-        local i=1
+        # Calculate columns based on terminal width
+        local term_width
+        term_width=$(tput cols 2>/dev/null || echo 80)
+
+        # Find max option length
+        local max_len=0
         for opt in "${options[@]}"; do
-            echo "  ${YELLOW}${i})${RESET} $opt"
-            ((i++))
+            [[ ${#opt} -gt $max_len ]] && max_len=${#opt}
         done
+
+        # Column width = number prefix (4) + option + padding (2)
+        local col_width=$((max_len + 6))
+        local num_cols=$((term_width / col_width))
+        [[ $num_cols -lt 1 ]] && num_cols=1
+        [[ $num_cols -gt 4 ]] && num_cols=4
+
+        # Print options in columns
+        local i=1
+        local col=0
+        for opt in "${options[@]}"; do
+            printf "${YELLOW}%3d)${RESET} %-${max_len}s  " "$i" "$opt"
+            ((col++))
+            ((i++))
+            if [[ $col -ge $num_cols ]]; then
+                echo ""
+                col=0
+            fi
+        done
+        [[ $col -ne 0 ]] && echo ""
         echo ""
 
         local choices
@@ -725,6 +801,146 @@ gum_format() {
     else
         echo "$text"
     fi
+}
+
+
+ui_read_key() {
+    local key
+    IFS= read -rsn1 key 2>/dev/null
+
+    # Handle escape sequences (arrow keys, function keys)
+    if [[ "$key" == $'\x1b' ]]; then
+        read -rsn2 -t 0.1 key2 2>/dev/null
+        key+="$key2"
+    fi
+
+    echo "$key"
+}
+
+hotkey_menu() {
+    local header="$1"
+    shift
+    local options=("$@")
+    local count=${#options[@]}
+
+    echo ""
+    echo "${BOLD}${CYAN}$header${RESET}"
+    echo ""
+
+    local i=1
+    for opt in "${options[@]}"; do
+        if [[ $i -le 9 ]]; then
+            echo "  ${YELLOW}[$i]${RESET} $opt"
+        else
+            local letter
+            letter=$(printf "\\x$(printf '%02x' $((96 + i - 9)))")  # a, b, c...
+            echo "  ${YELLOW}[$letter]${RESET} $opt"
+        fi
+        ((i++))
+    done
+
+    echo ""
+    echo "  ${YELLOW}[0]${RESET} Cancel"
+    echo ""
+    echo "${DIM}Press key to select${RESET}"
+
+    local key
+    key=$(ui_read_key)
+
+    case "$key" in
+        $'\x03'|0|q|Q|\x1b)  # Ctrl-C, 0, q, Escape
+            return 1
+            ;;
+        [1-9])
+            local idx=$((key - 1))
+            if [[ $idx -lt $count ]]; then
+                echo "${options[$idx]}"
+                return 0
+            fi
+            ;;
+        [a-z])
+            local idx=$(($(printf '%d' "'$key") - 97 + 9))
+            if [[ $idx -lt $count ]]; then
+                echo "${options[$idx]}"
+                return 0
+            fi
+            ;;
+    esac
+
+    return 1
+}
+
+hotkey_confirm_yesno() {
+    local question="$1"
+    local default="${2:-yes}"  # yes or no
+
+    echo ""
+    echo "$question"
+
+    if [[ "$default" == "yes" ]]; then
+        echo "  ${YELLOW}[Y]${RESET} Yes (default)"
+        echo "  ${YELLOW}[n]${RESET} No"
+    else
+        echo "  ${YELLOW}[y]${RESET} Yes"
+        echo "  ${YELLOW}[N]${RESET} No (default)"
+    fi
+    echo ""
+
+    local key
+    key=$(ui_read_key)
+
+    case "$key" in
+        y|Y) return 0 ;;
+        n|N) return 1 ;;
+        "")  # Enter key
+            [[ "$default" == "yes" ]] && return 0 || return 1
+            ;;
+        $'\x03'|\x1b)  # Ctrl-C, Escape
+            return 1
+            ;;
+        *)
+            [[ "$default" == "yes" ]] && return 0 || return 1
+            ;;
+    esac
+}
+
+show_key_hint() {
+    local hint="$1"
+    echo "${DIM}$hint${RESET}"
+}
+
+wait_any_key() {
+    local msg="${1:-Press any key to continue...}"
+    echo ""
+    echo "${DIM}$msg${RESET}"
+    read -rsn1
+}
+
+paginate_show() {
+    local -n items=$1
+    local page_size=${2:-10}
+    local page=${3:-1}
+
+    local total=${#items[@]}
+    local total_pages=$(( (total + page_size - 1) / page_size ))
+    local start=$(( (page - 1) * page_size ))
+    local end=$(( start + page_size ))
+    [[ $end -gt $total ]] && end=$total
+
+    local i=$start
+    local num=1
+    while [[ $i -lt $end ]]; do
+        if [[ $num -le 9 ]]; then
+            echo "  ${YELLOW}[$num]${RESET} ${items[$i]}"
+        else
+            echo "      ${items[$i]}"
+        fi
+        ((i++))
+        ((num++))
+    done
+
+    echo ""
+    echo "${DIM}Page $page/$total_pages | [n]ext [p]rev [q]uit${RESET}"
 }
 
 # === version.sh ===
@@ -858,7 +1074,138 @@ get_full_php_version() {
     "$php_bin" -r 'echo PHP_VERSION;' 2>/dev/null
 }
 
-# === install.sh (module) ===
+# === framework.sh ===
+
+detect_framework() {
+    local dir="${1:-$PWD}"
+
+    # Laravel: has artisan file
+    if [[ -f "$dir/artisan" ]]; then
+        echo "laravel"
+        return 0
+    fi
+
+    # Symfony: has bin/console or symfony.lock
+    if [[ -f "$dir/bin/console" ]] || [[ -f "$dir/symfony.lock" ]]; then
+        echo "symfony"
+        return 0
+    fi
+
+    # Yii2: has yii file
+    if [[ -f "$dir/yii" ]]; then
+        echo "yii"
+        return 0
+    fi
+
+    return 1
+}
+
+is_framework_project() {
+    [[ -n "$(detect_framework)" ]]
+}
+
+get_project_name() {
+    local dir="${1:-$PWD}"
+
+    if [[ -f "$dir/composer.json" ]]; then
+        local name
+        name=$(grep -oE '"name"\s*:\s*"[^"]+"' "$dir/composer.json" 2>/dev/null | head -1 | cut -d'"' -f4)
+        if [[ -n "$name" ]]; then
+            echo "$name"
+            return
+        fi
+    fi
+
+    # Fallback to directory name
+    basename "$dir"
+}
+
+get_console_command() {
+    local framework="${1:-$(detect_framework)}"
+    local dir="${2:-$PWD}"
+
+    case "$framework" in
+        laravel)  echo "$dir/artisan" ;;
+        symfony)  echo "$dir/bin/console" ;;
+        yii)      echo "$dir/yii" ;;
+    esac
+}
+
+get_serve_command() {
+    local framework="${1:-$(detect_framework)}"
+
+    case "$framework" in
+        laravel)  echo "artisan serve" ;;
+        symfony)  echo "bin/console server:start" ;;
+        yii)      echo "yii serve" ;;
+    esac
+}
+
+get_queue_command() {
+    local framework="${1:-$(detect_framework)}"
+
+    case "$framework" in
+        laravel)  echo "artisan queue:work" ;;
+        symfony)  echo "bin/console messenger:consume" ;;
+        yii)      echo "yii queue/listen" ;;
+    esac
+}
+
+get_scheduler_command() {
+    local framework="${1:-$(detect_framework)}"
+
+    case "$framework" in
+        laravel)  echo "artisan schedule:run" ;;
+        symfony)  echo "bin/console scheduler:run" ;;
+        yii)      echo "yii schedule/run" ;;
+    esac
+}
+
+has_horizon() {
+    local dir="${1:-$PWD}"
+    [[ -f "$dir/composer.json" ]] && grep -q '"laravel/horizon"' "$dir/composer.json" 2>/dev/null
+}
+
+has_octane() {
+    local dir="${1:-$PWD}"
+    [[ -f "$dir/composer.json" ]] && grep -q '"laravel/octane"' "$dir/composer.json" 2>/dev/null
+}
+
+get_framework_commands() {
+    local framework="${1:-$(detect_framework)}"
+    local php_bin="${2:-php}"
+
+    case "$framework" in
+        laravel)
+            "$php_bin" artisan list --format=txt 2>/dev/null | grep -E '^\s+\w+' | awk '{print $1}'
+            ;;
+        symfony)
+            "$php_bin" bin/console list --format=txt 2>/dev/null | grep -E '^\s+\w+' | awk '{print $1}'
+            ;;
+        yii)
+            "$php_bin" yii help 2>/dev/null | grep -E '^\s+-\s+' | awk '{print $2}'
+            ;;
+    esac
+}
+
+get_project_id() {
+    local dir="${1:-$PWD}"
+    # Use hash of absolute path for uniqueness
+    echo "phpvm_$(echo "$dir" | md5sum | cut -c1-8)"
+}
+
+get_framework_display_name() {
+    local framework="${1:-$(detect_framework)}"
+
+    case "$framework" in
+        laravel)  echo "Laravel" ;;
+        symfony)  echo "Symfony" ;;
+        yii)      echo "Yii2" ;;
+        *)        echo "PHP" ;;
+    esac
+}
+
+# === install.sh ===
 
 ensure_repository() {
     if ! check_php_repository; then
@@ -962,6 +1309,31 @@ cmd_install() {
     fi
 }
 
+show_failed_extensions() {
+    local version="$1"
+    shift
+    local failed=("$@")
+
+    if [[ ${#failed[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    echo ""
+    warn "The following extensions failed to install:"
+    echo ""
+
+    if [[ "$UI_MODE" == "gum" ]]; then
+        printf '%s\n' "${failed[@]}" | gum format
+    else
+        for ext in "${failed[@]}"; do
+            echo "  - php${version}-${ext}"
+        done
+    fi
+
+    echo ""
+    return 1
+}
+
 install_new_php_version() {
     local version="$1"
 
@@ -979,39 +1351,59 @@ install_new_php_version() {
         return 1
     fi
 
-    info_log "Installing PHP $version with default extensions..."
+    info_log "Installing PHP $version..."
+    echo ""
 
-    if gum_spin "Installing PHP $version" install_php_package "$version" "${DEFAULT_EXTENSIONS[@]}"; then
-        success "PHP $version installed successfully"
-
-        # Validate installation
-        local php_bin
-        php_bin=$(get_php_binary "$version")
-
-        if [[ -z "$php_bin" || ! -x "$php_bin" ]]; then
-            warn "PHP $version was installed but binary not found at expected location"
-            warn "You may need to configure your PATH or check the installation"
-        else
-            local full_version
-            full_version=$("$php_bin" -r 'echo PHP_VERSION;' 2>/dev/null)
-            success "Verified: PHP $full_version is working"
-        fi
-
-        # Set as default if first installation
-        local installed
-        installed=($(get_installed_versions))
-
-        if [[ ${#installed[@]} -eq 1 ]]; then
-            info_log "Setting PHP $version as default (first installation)"
-            mkdir -p "$PHPVM_DIR"
-            echo "$version" > "$PHPVM_CONFIG"
-        fi
-
-        return 0
-    else
-        error "Failed to install PHP $version"
+    # Install base PHP first
+    msg "Installing PHP $version base package..."
+    if ! install_php_base "$version"; then
+        error "Failed to install PHP $version base package"
         return 1
     fi
+    success "PHP $version base installed"
+
+    # Install default extensions one by one, collect failures
+    local failed_extensions=()
+
+    for ext in "${DEFAULT_EXTENSIONS[@]}"; do
+        msg "Installing php${version}-${ext}..."
+        if ! install_php_extension "$version" "$ext"; then
+            failed_extensions+=("$ext")
+        else
+            success "php${version}-${ext} installed"
+        fi
+    done
+
+    echo ""
+    success "PHP $version installation completed"
+
+    # Show failed extensions if any
+    show_failed_extensions "$version" "${failed_extensions[@]}"
+
+    # Validate installation
+    local php_bin
+    php_bin=$(get_php_binary "$version")
+
+    if [[ -z "$php_bin" || ! -x "$php_bin" ]]; then
+        warn "PHP $version was installed but binary not found at expected location"
+        warn "You may need to configure your PATH or check the installation"
+    else
+        local full_version
+        full_version=$("$php_bin" -r 'echo PHP_VERSION;' 2>/dev/null)
+        success "Verified: PHP $full_version is working"
+    fi
+
+    # Set as default if first installation
+    local installed
+    installed=($(get_installed_versions))
+
+    if [[ ${#installed[@]} -eq 1 ]]; then
+        info_log "Setting PHP $version as default (first installation)"
+        mkdir -p "$PHPVM_DIR"
+        echo "$version" > "$PHPVM_CONFIG"
+    fi
+
+    return 0
 }
 
 install_php_version_interactive() {
@@ -1107,108 +1499,81 @@ uninstall_php_version() {
 
 install_extension() {
     local version="$1"
-    local pm=$(get_package_manager)
 
     info_log "Fetching available extensions for PHP $version..."
 
+    # Get available and installed extensions using platform functions
     local available=()
     local installed_ext=()
 
-    case "$pm" in
-        apt)
-            # Get available packages
-            while IFS= read -r line; do
-                local ext_name
-                ext_name=$(echo "$line" | sed "s/php${version}-//" | cut -d' ' -f1)
-                available+=("$ext_name")
-            done < <(apt-cache search "^php${version}-" 2>/dev/null | sort)
+    while IFS= read -r ext; do
+        [[ -n "$ext" ]] && available+=("$ext")
+    done < <(get_available_extensions "$version")
 
-            # Get installed packages
-            while IFS= read -r line; do
-                local ext_name
-                ext_name=$(echo "$line" | sed "s/php${version}-//")
-                installed_ext+=("$ext_name")
-            done < <(dpkg -l "php${version}-*" 2>/dev/null | grep "^ii" | awk '{print $2}' | sed "s/:.*//")
-            ;;
-        dnf|yum)
-            local v_nodot="${version//./}"
-            while IFS= read -r line; do
-                local ext_name
-                ext_name=$(echo "$line" | sed "s/php${v_nodot}-php-//" | sed "s/php${v_nodot}-//" | cut -d'.' -f1)
-                available+=("$ext_name")
-            done < <($pm list available "php${v_nodot}*" 2>/dev/null | grep -v "^Last" | awk '{print $1}' | sort -u)
-
-            while IFS= read -r line; do
-                local ext_name
-                ext_name=$(echo "$line" | sed "s/php${v_nodot}-php-//" | sed "s/php${v_nodot}-//" | cut -d'.' -f1)
-                installed_ext+=("$ext_name")
-            done < <($pm list installed "php${v_nodot}*" 2>/dev/null | grep -v "^Installed" | awk '{print $1}')
-            ;;
-    esac
+    while IFS= read -r ext; do
+        [[ -n "$ext" ]] && installed_ext+=("$ext")
+    done < <(get_installed_extensions "$version")
 
     if [[ ${#available[@]} -eq 0 ]]; then
         error "No extensions found for PHP $version"
         return 1
     fi
 
-    # Build display options
+    # Build display options (only show not installed extensions)
     local options=()
     for ext in "${available[@]}"; do
-        local label="$ext"
+        local is_installed=false
         for inst in "${installed_ext[@]}"; do
             if [[ "$inst" == "$ext" ]]; then
-                label="[INSTALLED] $ext"
+                is_installed=true
                 break
             fi
         done
-        options+=("$label")
+        if [[ "$is_installed" == "false" ]]; then
+            options+=("$ext")
+        fi
     done
 
-    local choice
-    choice=$(gum_menu "Select extension for PHP $version:" "${options[@]}")
+    if [[ ${#options[@]} -eq 0 ]]; then
+        info_log "All available extensions are already installed"
+        return 0
+    fi
 
-    if [[ -z "$choice" ]]; then
+    # Use multiselect menu
+    local selected
+    selected=$(gum_multi_menu "Select extensions to install for PHP $version:" "${options[@]}")
+
+    if [[ -z "$selected" ]]; then
         msg "Cancelled"
         return
     fi
 
-    local ext_name
-    ext_name=$(echo "$choice" | sed 's/\[INSTALLED\] //')
+    echo ""
 
-    if [[ "$choice" == "[INSTALLED]"* ]]; then
-        local action
-        action=$(gum_menu "Extension $ext_name is installed. What would you like to do?" \
-            "Update" \
-            "Uninstall" \
-            "Cancel")
+    # Install selected extensions one by one, collect failures
+    local failed_extensions=()
+    local success_count=0
 
-        case "$action" in
-            "Update")
-                case "$pm" in
-                    apt) gum_spin "Updating $ext_name" run_privileged apt-get upgrade -y "php${version}-${ext_name}" ;;
-                    dnf|yum) gum_spin "Updating $ext_name" run_privileged $pm update -y "php${version//./}-php-${ext_name}" ;;
-                esac
-                success "Extension $ext_name updated"
-                ;;
-            "Uninstall")
-                case "$pm" in
-                    apt) gum_spin "Removing $ext_name" run_privileged apt-get remove -y "php${version}-${ext_name}" ;;
-                    dnf|yum) gum_spin "Removing $ext_name" run_privileged $pm remove -y "php${version//./}-php-${ext_name}" ;;
-                esac
-                success "Extension $ext_name removed"
-                ;;
-            *)
-                msg "Cancelled"
-                ;;
-        esac
-    else
-        info_log "Installing extension $ext_name for PHP $version..."
-        case "$pm" in
-            apt) gum_spin "Installing $ext_name" run_privileged apt-get install -y "php${version}-${ext_name}" ;;
-            dnf|yum) gum_spin "Installing $ext_name" run_privileged $pm install -y "php${version//./}-php-${ext_name}" ;;
-        esac
-        success "Extension $ext_name installed"
+    while IFS= read -r ext_name; do
+        [[ -z "$ext_name" ]] && continue
+        msg "Installing php${version}-${ext_name}..."
+        if install_php_extension "$version" "$ext_name"; then
+            success "php${version}-${ext_name} installed"
+            ((success_count++))
+        else
+            failed_extensions+=("$ext_name")
+        fi
+    done <<< "$selected"
+
+    echo ""
+
+    # Show summary
+    if [[ $success_count -gt 0 ]]; then
+        success "$success_count extension(s) installed successfully"
     fi
+
+    # Show failed extensions if any
+    show_failed_extensions "$version" "${failed_extensions[@]}"
 }
 
 check_no_php_installed() {
@@ -1799,17 +2164,17 @@ fpm_service_control() {
     local current
     current=$(get_current_version)
 
-    # Build service options with status
+    # Build service options with status (no colors in menu labels)
     local options=()
     for v in "${services[@]}"; do
         local service="php${v}-fpm"
         local status
         if systemctl is-active "$service" &>/dev/null; then
-            status="${GREEN}running${RESET}"
+            status="running"
         else
-            status="${RED}stopped${RESET}"
+            status="stopped"
         fi
-        local label="PHP $v FPM ($status)"
+        local label="PHP $v FPM [$status]"
         [[ "$v" == "$current" ]] && label="$label <- current"
         options+=("$label")
     done
@@ -1845,16 +2210,17 @@ fpm_service_control() {
 fpm_enable_disable() {
     local services=("$@")
 
+    # Build options (no colors in menu labels)
     local options=()
     for v in "${services[@]}"; do
         local service="php${v}-fpm"
         local status
         if systemctl is-enabled "$service" &>/dev/null; then
-            status="${GREEN}enabled${RESET}"
+            status="enabled"
         else
-            status="${YELLOW}disabled${RESET}"
+            status="disabled"
         fi
-        options+=("PHP $v FPM ($status)")
+        options+=("PHP $v FPM [$status]")
     done
 
     local choice
@@ -2036,6 +2402,4290 @@ fpm_view_status() {
     echo ""
 }
 
+# === worker.sh ===
+
+SUPERVISOR_CONF_DIR="/etc/supervisor/conf.d"
+PHPVM_WORKER_PREFIX="phpvm_worker_"
+
+check_supervisor() {
+    if ! command_exists supervisorctl; then
+        error "Supervisor is not installed"
+        echo ""
+        echo "Install with:"
+        echo "  Ubuntu/Debian: sudo apt install supervisor"
+        echo "  RHEL/CentOS:   sudo yum install supervisor"
+        return 1
+    fi
+    return 0
+}
+
+get_worker_config_path() {
+    local project_id="$1"
+    local worker_name="$2"
+    echo "${SUPERVISOR_CONF_DIR}/${PHPVM_WORKER_PREFIX}${project_id}_${worker_name}.conf"
+}
+
+list_project_workers() {
+    local project_id
+    project_id=$(get_project_id)
+
+    local workers=()
+    if [[ -d "$SUPERVISOR_CONF_DIR" ]]; then
+        while IFS= read -r -d '' file; do
+            local name
+            name=$(basename "$file" .conf | sed "s/${PHPVM_WORKER_PREFIX}${project_id}_//")
+            workers+=("$name")
+        done < <(find "$SUPERVISOR_CONF_DIR" -name "${PHPVM_WORKER_PREFIX}${project_id}_*.conf" -print0 2>/dev/null)
+    fi
+
+    printf '%s\n' "${workers[@]}"
+}
+
+get_worker_status() {
+    local program_name="$1"
+    supervisorctl status "$program_name" 2>/dev/null | awk '{print $2}'
+}
+
+cmd_worker() {
+    local framework
+    framework=$(detect_framework)
+
+    if [[ -z "$framework" ]]; then
+        error "Not in a PHP framework project directory"
+        echo "Supported: Laravel, Symfony, Yii2"
+        return 1
+    fi
+
+    check_supervisor || return 1
+
+    local action
+    action=$(gum_menu "Queue Worker Management ($(get_framework_display_name)):" \
+        "Add Worker" \
+        "List Workers" \
+        "Start Worker" \
+        "Stop Worker" \
+        "Restart Worker" \
+        "Remove Worker" \
+        "View Logs")
+
+    case "$action" in
+        "Add Worker")     worker_add ;;
+        "List Workers")   worker_list ;;
+        "Start Worker")   worker_control "start" ;;
+        "Stop Worker")    worker_control "stop" ;;
+        "Restart Worker") worker_control "restart" ;;
+        "Remove Worker")  worker_remove ;;
+        "View Logs")      worker_logs ;;
+        *)                msg "Cancelled" ;;
+    esac
+}
+
+worker_add() {
+    local framework
+    framework=$(detect_framework)
+    local project_id
+    project_id=$(get_project_id)
+    local project_name
+    project_name=$(get_project_name)
+    local php_bin
+    php_bin=$(get_php_binary)
+
+    echo ""
+    echo "${BOLD}Add Queue Worker${RESET}"
+    echo ""
+
+    # Worker name
+    local worker_name
+    worker_name=$(gum_input "Worker name:" "" "default")
+    [[ -z "$worker_name" ]] && { msg "Cancelled"; return; }
+
+    # Sanitize worker name
+    worker_name=$(echo "$worker_name" | tr -cd 'a-zA-Z0-9_-')
+
+    local command=""
+    local num_procs=1
+
+    # Framework-specific options
+    case "$framework" in
+        laravel)
+            if has_horizon; then
+                local use_horizon
+                use_horizon=$(gum_menu "Laravel Horizon is installed. Use:" \
+                    "Horizon (recommended for production)" \
+                    "queue:work (standard)")
+
+                if [[ "$use_horizon" == "Horizon"* ]]; then
+                    command="$php_bin $PWD/artisan horizon"
+                    num_procs=1  # Horizon manages its own workers
+                else
+                    local queue
+                    queue=$(gum_input "Queue name:" "default")
+                    local connection
+                    connection=$(gum_input "Connection:" "redis")
+                    command="$php_bin $PWD/artisan queue:work $connection --queue=$queue --sleep=3 --tries=3"
+                fi
+            else
+                local queue
+                queue=$(gum_input "Queue name:" "default")
+                local connection
+                connection=$(gum_input "Connection:" "database")
+                command="$php_bin $PWD/artisan queue:work $connection --queue=$queue --sleep=3 --tries=3"
+            fi
+            ;;
+        symfony)
+            local transport
+            transport=$(gum_input "Transport name:" "async")
+            command="$php_bin $PWD/bin/console messenger:consume $transport --time-limit=3600"
+            ;;
+        yii)
+            command="$php_bin $PWD/yii queue/listen --verbose"
+            ;;
+    esac
+
+    # Number of processes
+    local procs_input
+    procs_input=$(gum_input "Number of processes:" "$num_procs")
+    num_procs="${procs_input:-$num_procs}"
+
+    # User
+    local user
+    user=$(gum_input "Run as user:" "$(whoami)")
+
+    # Generate config
+    local config_path
+    config_path=$(get_worker_config_path "$project_id" "$worker_name")
+    local program_name="${PHPVM_WORKER_PREFIX}${project_id}_${worker_name}"
+
+    local config_content="[program:${program_name}]
+process_name=%(program_name)s_%(process_num)02d
+command=${command}
+directory=${PWD}
+user=${user}
+numprocs=${num_procs}
+autostart=true
+autorestart=true
+startsecs=1
+startretries=3
+redirect_stderr=true
+stdout_logfile=/var/log/supervisor/${program_name}.log
+stdout_logfile_maxbytes=10MB
+stdout_logfile_backups=5
+stopwaitsecs=60
+; Project: ${project_name}
+; Path: ${PWD}
+; Framework: ${framework}
+"
+
+    echo ""
+    echo "${CYAN}Supervisor configuration:${RESET}"
+    echo "$config_content"
+    echo ""
+
+    if ! gum_confirm "Create this worker?"; then
+        msg "Cancelled"
+        return
+    fi
+
+    # Write config
+    echo "$config_content" | run_privileged tee "$config_path" > /dev/null
+
+    # Reload supervisor
+    run_privileged supervisorctl reread
+    run_privileged supervisorctl update
+
+    success "Worker '$worker_name' created"
+    info_log "Config: $config_path"
+
+    if gum_confirm "Start worker now?"; then
+        run_privileged supervisorctl start "${program_name}:*"
+        success "Worker started"
+    fi
+}
+
+worker_list() {
+    local project_id
+    project_id=$(get_project_id)
+
+    echo ""
+    echo "${BOLD}Queue Workers for $(get_project_name):${RESET}"
+    echo ""
+
+    local workers
+    workers=$(list_project_workers)
+
+    if [[ -z "$workers" ]]; then
+        warn "No workers configured for this project"
+        return
+    fi
+
+    while IFS= read -r worker; do
+        local program_name="${PHPVM_WORKER_PREFIX}${project_id}_${worker}"
+        local status
+        status=$(get_worker_status "$program_name:*")
+
+        local status_color
+        case "$status" in
+            RUNNING) status_color="${GREEN}${status}${RESET}" ;;
+            STOPPED) status_color="${YELLOW}${status}${RESET}" ;;
+            *)       status_color="${RED}${status}${RESET}" ;;
+        esac
+
+        printf "  %-20s %s\n" "$worker" "$status_color"
+    done <<< "$workers"
+
+    echo ""
+}
+
+worker_control() {
+    local action="$1"
+    local project_id
+    project_id=$(get_project_id)
+
+    local workers
+    workers=$(list_project_workers)
+
+    if [[ -z "$workers" ]]; then
+        warn "No workers configured for this project"
+        return
+    fi
+
+    # Build options with status
+    local options=()
+    while IFS= read -r worker; do
+        local program_name="${PHPVM_WORKER_PREFIX}${project_id}_${worker}"
+        local status
+        status=$(get_worker_status "$program_name:*")
+        options+=("$worker [$status]")
+    done <<< "$workers"
+
+    options+=("All workers")
+
+    local choice
+    choice=$(gum_menu "Select worker to ${action}:" "${options[@]}")
+
+    [[ -z "$choice" ]] && { msg "Cancelled"; return; }
+
+    if [[ "$choice" == "All workers" ]]; then
+        while IFS= read -r worker; do
+            local program_name="${PHPVM_WORKER_PREFIX}${project_id}_${worker}"
+            run_privileged supervisorctl "$action" "${program_name}:*"
+        done <<< "$workers"
+        success "All workers ${action}ed"
+    else
+        local worker_name
+        worker_name=$(echo "$choice" | cut -d' ' -f1)
+        local program_name="${PHPVM_WORKER_PREFIX}${project_id}_${worker_name}"
+        run_privileged supervisorctl "$action" "${program_name}:*"
+        success "Worker '$worker_name' ${action}ed"
+    fi
+}
+
+worker_remove() {
+    local project_id
+    project_id=$(get_project_id)
+
+    local workers
+    workers=$(list_project_workers)
+
+    if [[ -z "$workers" ]]; then
+        warn "No workers configured for this project"
+        return
+    fi
+
+    local options=()
+    while IFS= read -r worker; do
+        options+=("$worker")
+    done <<< "$workers"
+
+    local choice
+    choice=$(gum_menu "Select worker to remove:" "${options[@]}")
+
+    [[ -z "$choice" ]] && { msg "Cancelled"; return; }
+
+    if ! gum_confirm "Remove worker '$choice'?" "no"; then
+        msg "Cancelled"
+        return
+    fi
+
+    local program_name="${PHPVM_WORKER_PREFIX}${project_id}_${choice}"
+    local config_path
+    config_path=$(get_worker_config_path "$project_id" "$choice")
+
+    # Stop worker first
+    run_privileged supervisorctl stop "${program_name}:*" 2>/dev/null
+
+    # Remove config
+    run_privileged rm -f "$config_path"
+
+    # Update supervisor
+    run_privileged supervisorctl reread
+    run_privileged supervisorctl update
+
+    success "Worker '$choice' removed"
+}
+
+worker_logs() {
+    local project_id
+    project_id=$(get_project_id)
+
+    local workers
+    workers=$(list_project_workers)
+
+    if [[ -z "$workers" ]]; then
+        warn "No workers configured for this project"
+        return
+    fi
+
+    local options=()
+    while IFS= read -r worker; do
+        options+=("$worker")
+    done <<< "$workers"
+
+    local choice
+    choice=$(gum_menu "Select worker to view logs:" "${options[@]}")
+
+    [[ -z "$choice" ]] && { msg "Cancelled"; return; }
+
+    local program_name="${PHPVM_WORKER_PREFIX}${project_id}_${choice}"
+    local log_file="/var/log/supervisor/${program_name}.log"
+
+    if [[ ! -f "$log_file" ]]; then
+        warn "Log file not found: $log_file"
+        return
+    fi
+
+    local action
+    action=$(gum_menu "Log action:" \
+        "View last 100 lines" \
+        "Follow logs (tail -f)" \
+        "View full log")
+
+    case "$action" in
+        "View last"*)
+            run_privileged tail -n 100 "$log_file" | gum pager
+            ;;
+        "Follow"*)
+            info_log "Press Ctrl+C to stop"
+            run_privileged tail -f "$log_file"
+            ;;
+        "View full"*)
+            run_privileged cat "$log_file" | gum pager
+            ;;
+    esac
+}
+
+# === cron.sh ===
+
+PHPVM_CRON_MARKER="# PHPVM:"
+
+get_cron_marker() {
+    local project_id
+    project_id=$(get_project_id)
+    echo "${PHPVM_CRON_MARKER}${project_id}"
+}
+
+list_project_crons() {
+    local marker
+    marker=$(get_cron_marker)
+
+    crontab -l 2>/dev/null | grep -A1 "$marker" | grep -v "^--$" | grep -v "^${PHPVM_CRON_MARKER}"
+}
+
+count_project_crons() {
+    local marker
+    marker=$(get_cron_marker)
+
+    crontab -l 2>/dev/null | grep "$marker" | wc -l
+}
+
+cmd_cron() {
+    local framework
+    framework=$(detect_framework)
+
+    if [[ -z "$framework" ]]; then
+        error "Not in a PHP framework project directory"
+        echo "Supported: Laravel, Symfony, Yii2"
+        return 1
+    fi
+
+    local action
+    action=$(gum_menu "Scheduler/Cron Management ($(get_framework_display_name)):" \
+        "Add Scheduler" \
+        "Add Custom Cron" \
+        "List Crons" \
+        "Remove Cron" \
+        "Remove All Project Crons")
+
+    case "$action" in
+        "Add Scheduler")       cron_add_scheduler ;;
+        "Add Custom Cron")     cron_add_custom ;;
+        "List Crons")          cron_list ;;
+        "Remove Cron")         cron_remove ;;
+        "Remove All"*)         cron_remove_all ;;
+        *)                     msg "Cancelled" ;;
+    esac
+}
+
+cron_add_scheduler() {
+    local framework
+    framework=$(detect_framework)
+    local project_name
+    project_name=$(get_project_name)
+    local marker
+    marker=$(get_cron_marker)
+    local php_bin
+    php_bin=$(get_php_binary)
+
+    echo ""
+    echo "${BOLD}Add Scheduler Cron${RESET}"
+    echo ""
+
+    local schedule="* * * * *"
+    local command=""
+    local description=""
+
+    case "$framework" in
+        laravel)
+            command="cd $PWD && $php_bin artisan schedule:run >> /dev/null 2>&1"
+            description="Laravel scheduler"
+            ;;
+        symfony)
+            # Symfony doesn't have built-in scheduler like Laravel
+            local schedule_cmd
+            schedule_cmd=$(gum_input "Symfony command to schedule:" "app:my-command")
+            command="cd $PWD && $php_bin bin/console $schedule_cmd >> /dev/null 2>&1"
+            description="Symfony: $schedule_cmd"
+
+            # Ask for custom schedule
+            local custom_schedule
+            custom_schedule=$(gum_input "Cron schedule:" "$schedule")
+            schedule="${custom_schedule:-$schedule}"
+            ;;
+        yii)
+            command="cd $PWD && $php_bin yii schedule/run >> /dev/null 2>&1"
+            description="Yii2 scheduler"
+            ;;
+    esac
+
+    echo ""
+    echo "${CYAN}Cron entry:${RESET}"
+    echo "$schedule $command"
+    echo ""
+
+    if ! gum_confirm "Add this cron job?"; then
+        msg "Cancelled"
+        return
+    fi
+
+    # Add to crontab
+    local new_cron="${marker} ${project_name} - ${description}
+${schedule} ${command}"
+
+    (crontab -l 2>/dev/null; echo "$new_cron") | crontab -
+
+    success "Scheduler cron added"
+    info_log "Project: $project_name"
+}
+
+cron_add_custom() {
+    local framework
+    framework=$(detect_framework)
+    local project_name
+    project_name=$(get_project_name)
+    local marker
+    marker=$(get_cron_marker)
+    local php_bin
+    php_bin=$(get_php_binary)
+
+    echo ""
+    echo "${BOLD}Add Custom Cron${RESET}"
+    echo ""
+
+    # Schedule selection
+    local schedule
+    local schedule_choice
+    schedule_choice=$(gum_menu "Select schedule:" \
+        "Every minute (* * * * *)" \
+        "Every 5 minutes (*/5 * * * *)" \
+        "Every hour (0 * * * *)" \
+        "Every day at midnight (0 0 * * *)" \
+        "Every Monday at 9am (0 9 * * 1)" \
+        "Custom schedule")
+
+    case "$schedule_choice" in
+        "Every minute"*)     schedule="* * * * *" ;;
+        "Every 5"*)          schedule="*/5 * * * *" ;;
+        "Every hour"*)       schedule="0 * * * *" ;;
+        "Every day"*)        schedule="0 0 * * *" ;;
+        "Every Monday"*)     schedule="0 9 * * 1" ;;
+        "Custom"*)
+            schedule=$(gum_input "Cron schedule (min hour day month weekday):" "* * * * *")
+            ;;
+        *)
+            msg "Cancelled"
+            return
+            ;;
+    esac
+
+    # Command selection
+    local command=""
+    local description=""
+
+    case "$framework" in
+        laravel)
+            local artisan_cmd
+            artisan_cmd=$(gum_input "Artisan command:" "inspire")
+            command="cd $PWD && $php_bin artisan $artisan_cmd >> /dev/null 2>&1"
+            description="artisan $artisan_cmd"
+            ;;
+        symfony)
+            local console_cmd
+            console_cmd=$(gum_input "Console command:" "app:my-command")
+            command="cd $PWD && $php_bin bin/console $console_cmd >> /dev/null 2>&1"
+            description="console $console_cmd"
+            ;;
+        yii)
+            local yii_cmd
+            yii_cmd=$(gum_input "Yii command:" "my/command")
+            command="cd $PWD && $php_bin yii $yii_cmd >> /dev/null 2>&1"
+            description="yii $yii_cmd"
+            ;;
+    esac
+
+    echo ""
+    echo "${CYAN}Cron entry:${RESET}"
+    echo "$schedule $command"
+    echo ""
+
+    if ! gum_confirm "Add this cron job?"; then
+        msg "Cancelled"
+        return
+    fi
+
+    # Add to crontab
+    local new_cron="${marker} ${project_name} - ${description}
+${schedule} ${command}"
+
+    (crontab -l 2>/dev/null; echo "$new_cron") | crontab -
+
+    success "Custom cron added"
+}
+
+cron_list() {
+    local marker
+    marker=$(get_cron_marker)
+    local project_name
+    project_name=$(get_project_name)
+
+    echo ""
+    echo "${BOLD}Cron Jobs for ${project_name}:${RESET}"
+    echo ""
+
+    local crons
+    crons=$(crontab -l 2>/dev/null | grep -A1 "$marker")
+
+    if [[ -z "$crons" ]]; then
+        warn "No cron jobs configured for this project"
+        return
+    fi
+
+    local count=1
+    while IFS= read -r line; do
+        if [[ "$line" == "${PHPVM_CRON_MARKER}"* ]]; then
+            local desc
+            desc=$(echo "$line" | sed "s/${PHPVM_CRON_MARKER}[^ ]* //")
+            echo "${CYAN}[$count] $desc${RESET}"
+        elif [[ -n "$line" && "$line" != "--" ]]; then
+            echo "    $line"
+            echo ""
+            ((count++))
+        fi
+    done <<< "$crons"
+}
+
+cron_remove() {
+    local marker
+    marker=$(get_cron_marker)
+
+    local crons
+    crons=$(crontab -l 2>/dev/null | grep "$marker")
+
+    if [[ -z "$crons" ]]; then
+        warn "No cron jobs configured for this project"
+        return
+    fi
+
+    # Build options
+    local options=()
+    while IFS= read -r line; do
+        local desc
+        desc=$(echo "$line" | sed "s/${PHPVM_CRON_MARKER}[^ ]* //")
+        options+=("$desc")
+    done <<< "$crons"
+
+    local choice
+    choice=$(gum_menu "Select cron to remove:" "${options[@]}")
+
+    [[ -z "$choice" ]] && { msg "Cancelled"; return; }
+
+    if ! gum_confirm "Remove this cron job?" "no"; then
+        msg "Cancelled"
+        return
+    fi
+
+    # Remove from crontab (remove marker line and following command line)
+    local escaped_choice
+    escaped_choice=$(echo "$choice" | sed 's/[[\.*^$()+?{|]/\\&/g')
+
+    crontab -l 2>/dev/null | grep -v "${marker}.*${escaped_choice}" | \
+        awk -v marker="$marker" -v choice="$choice" '
+            BEGIN { skip_next = 0 }
+            {
+                if (skip_next) { skip_next = 0; next }
+                if ($0 ~ marker && $0 ~ choice) { skip_next = 1; next }
+                print
+            }
+        ' | crontab -
+
+    success "Cron job removed"
+}
+
+cron_remove_all() {
+    local marker
+    marker=$(get_cron_marker)
+    local project_name
+    project_name=$(get_project_name)
+
+    local count
+    count=$(count_project_crons)
+
+    if [[ "$count" -eq 0 ]]; then
+        warn "No cron jobs configured for this project"
+        return
+    fi
+
+    echo ""
+    warn "This will remove $count cron job(s) for '$project_name'"
+    echo ""
+
+    if ! gum_confirm "Remove all project crons?" "no"; then
+        msg "Cancelled"
+        return
+    fi
+
+    # Remove all project crons from crontab
+    crontab -l 2>/dev/null | awk -v marker="$marker" '
+        BEGIN { skip_next = 0 }
+        {
+            if (skip_next) { skip_next = 0; next }
+            if ($0 ~ marker) { skip_next = 1; next }
+            print
+        }
+    ' | crontab -
+
+    success "All project crons removed"
+}
+
+# === serve.sh ===
+
+cmd_serve() {
+    local framework
+    framework=$(detect_framework)
+
+    if [[ -z "$framework" ]]; then
+        error "Not in a PHP framework project directory"
+        echo "Supported: Laravel, Symfony, Yii2"
+        return 1
+    fi
+
+    local php_bin
+    php_bin=$(get_php_binary)
+
+    case "$framework" in
+        laravel)  serve_laravel "$php_bin" ;;
+        symfony)  serve_symfony "$php_bin" ;;
+        yii)      serve_yii "$php_bin" ;;
+    esac
+}
+
+serve_laravel() {
+    local php_bin="$1"
+
+    local options=("artisan serve (built-in)")
+
+    if has_octane; then
+        options+=("Octane (Swoole/RoadRunner)")
+    fi
+
+    options+=("PHP built-in server")
+
+    local choice
+    choice=$(gum_menu "Select server for Laravel:" "${options[@]}")
+
+    case "$choice" in
+        "artisan serve"*)
+            serve_artisan "$php_bin"
+            ;;
+        "Octane"*)
+            serve_octane "$php_bin"
+            ;;
+        "PHP built-in"*)
+            serve_builtin "$php_bin" "public"
+            ;;
+        *)
+            msg "Cancelled"
+            ;;
+    esac
+}
+
+serve_symfony() {
+    local php_bin="$1"
+
+    local choice
+    choice=$(gum_menu "Select server for Symfony:" \
+        "bin/console server:start" \
+        "symfony serve (if installed)" \
+        "PHP built-in server")
+
+    case "$choice" in
+        "bin/console"*)
+            serve_symfony_console "$php_bin"
+            ;;
+        "symfony serve"*)
+            serve_symfony_cli
+            ;;
+        "PHP built-in"*)
+            serve_builtin "$php_bin" "public"
+            ;;
+        *)
+            msg "Cancelled"
+            ;;
+    esac
+}
+
+serve_yii() {
+    local php_bin="$1"
+
+    local choice
+    choice=$(gum_menu "Select server for Yii2:" \
+        "yii serve (built-in)" \
+        "PHP built-in server")
+
+    case "$choice" in
+        "yii serve"*)
+            serve_yii_builtin "$php_bin"
+            ;;
+        "PHP built-in"*)
+            serve_builtin "$php_bin" "web"
+            ;;
+        *)
+            msg "Cancelled"
+            ;;
+    esac
+}
+
+serve_artisan() {
+    local php_bin="$1"
+
+    local host
+    host=$(gum_input "Host:" "127.0.0.1")
+
+    local port
+    port=$(gum_input "Port:" "8000")
+
+    echo ""
+    info_log "Starting Laravel development server..."
+    echo "${CYAN}http://${host}:${port}${RESET}"
+    echo "${DIM}Press Ctrl+C to stop${RESET}"
+    echo ""
+
+    "$php_bin" artisan serve --host="$host" --port="$port"
+}
+
+serve_octane() {
+    local php_bin="$1"
+
+    local server
+    server=$(gum_menu "Octane server:" \
+        "Swoole" \
+        "RoadRunner" \
+        "FrankenPHP")
+
+    local host
+    host=$(gum_input "Host:" "127.0.0.1")
+
+    local port
+    port=$(gum_input "Port:" "8000")
+
+    local workers
+    workers=$(gum_input "Workers:" "auto")
+
+    echo ""
+    info_log "Starting Laravel Octane (${server})..."
+    echo "${CYAN}http://${host}:${port}${RESET}"
+    echo "${DIM}Press Ctrl+C to stop${RESET}"
+    echo ""
+
+    local server_option
+    case "$server" in
+        "Swoole")      server_option="--server=swoole" ;;
+        "RoadRunner")  server_option="--server=roadrunner" ;;
+        "FrankenPHP")  server_option="--server=frankenphp" ;;
+    esac
+
+    "$php_bin" artisan octane:start $server_option --host="$host" --port="$port" --workers="$workers"
+}
+
+serve_symfony_console() {
+    local php_bin="$1"
+
+    local host
+    host=$(gum_input "Host:" "127.0.0.1")
+
+    local port
+    port=$(gum_input "Port:" "8000")
+
+    echo ""
+    info_log "Starting Symfony development server..."
+    echo "${CYAN}http://${host}:${port}${RESET}"
+    echo "${DIM}Press Ctrl+C to stop${RESET}"
+    echo ""
+
+    "$php_bin" bin/console server:start "${host}:${port}"
+}
+
+serve_symfony_cli() {
+    if ! command_exists symfony; then
+        error "Symfony CLI is not installed"
+        echo "Install: https://symfony.com/download"
+        return 1
+    fi
+
+    local port
+    port=$(gum_input "Port:" "8000")
+
+    echo ""
+    info_log "Starting Symfony local server..."
+    echo "${DIM}Press Ctrl+C to stop${RESET}"
+    echo ""
+
+    symfony serve --port="$port"
+}
+
+serve_yii_builtin() {
+    local php_bin="$1"
+
+    local host
+    host=$(gum_input "Host:" "localhost")
+
+    local port
+    port=$(gum_input "Port:" "8080")
+
+    echo ""
+    info_log "Starting Yii2 development server..."
+    echo "${CYAN}http://${host}:${port}${RESET}"
+    echo "${DIM}Press Ctrl+C to stop${RESET}"
+    echo ""
+
+    "$php_bin" yii serve "$host:$port"
+}
+
+serve_builtin() {
+    local php_bin="$1"
+    local docroot="${2:-public}"
+
+    local host
+    host=$(gum_input "Host:" "127.0.0.1")
+
+    local port
+    port=$(gum_input "Port:" "8000")
+
+    # Check if docroot exists
+    if [[ ! -d "$docroot" ]]; then
+        local available_dirs=()
+        [[ -d "public" ]] && available_dirs+=("public")
+        [[ -d "web" ]] && available_dirs+=("web")
+        [[ -d "www" ]] && available_dirs+=("www")
+        available_dirs+=("." "Custom path")
+
+        docroot=$(gum_menu "Document root:" "${available_dirs[@]}")
+
+        if [[ "$docroot" == "Custom path" ]]; then
+            docroot=$(gum_input "Document root path:" ".")
+        fi
+    fi
+
+    echo ""
+    info_log "Starting PHP built-in server..."
+    echo "${CYAN}http://${host}:${port}${RESET}"
+    echo "Document root: $PWD/$docroot"
+    echo "${DIM}Press Ctrl+C to stop${RESET}"
+    echo ""
+
+    "$php_bin" -S "${host}:${port}" -t "$docroot"
+}
+
+# === menu.sh ===
+
+TERM_LINES=""
+TERM_COLS=""
+
+update_term_size() {
+    TERM_LINES=$(tput lines 2>/dev/null || echo 24)
+    TERM_COLS=$(tput cols 2>/dev/null || echo 80)
+}
+
+clear_screen() {
+    printf '\033[2J\033[H'
+}
+
+hide_cursor() { printf '\033[?25l'; }
+show_cursor() { printf '\033[?25h'; }
+
+move_cursor() { printf '\033[%d;%dH' "$1" "$2"; }
+
+read_key() {
+    local key
+    IFS= read -rsn1 key 2>/dev/null
+
+    # Check for escape sequences (arrow keys, etc.)
+    if [[ "$key" == $'\x1b' ]]; then
+        read -rsn2 -t 0.1 key2 2>/dev/null
+        key+="$key2"
+    fi
+
+    echo "$key"
+}
+
+cmd_menu() {
+    # Check for gum
+    if [[ "$UI_MODE" != "gum" ]]; then
+        fallback_menu
+        return
+    fi
+
+    update_term_size
+    trap 'show_cursor; clear_screen' EXIT
+
+    local framework
+    framework=$(detect_framework 2>/dev/null)
+
+    while true; do
+        clear_screen
+        hide_cursor
+
+        if ! dashboard_main "$framework"; then
+            break
+        fi
+    done
+
+    show_cursor
+    clear_screen
+}
+
+dashboard_main() {
+    local framework="$1"
+
+    update_term_size
+    local height=$((TERM_LINES - 2))
+
+    # Print header
+    print_dashboard_header "$framework"
+
+    # Print menu with hotkeys
+    print_hotkey_menu "$framework"
+
+    # Print footer
+    print_footer
+
+    # Wait for key
+    local key
+    key=$(read_key)
+
+    # Handle key
+    handle_hotkey "$key" "$framework"
+}
+
+print_dashboard_header() {
+    local framework="$1"
+
+    local version
+    version=$(get_current_version 2>/dev/null)
+    local full_version
+    full_version=$(get_full_php_version "$version" 2>/dev/null)
+
+    local project_info=""
+    if [[ -n "$framework" ]]; then
+        local project_name
+        project_name=$(get_project_name 2>/dev/null)
+        project_info=" │ $(get_framework_display_name "$framework"): ${project_name}"
+    fi
+
+    # Get nginx status
+    local nginx_status=""
+    if command -v nginx &>/dev/null; then
+        if pgrep -x nginx &>/dev/null; then
+            nginx_status="${GREEN}●${RESET}"
+        else
+            nginx_status="${RED}●${RESET}"
+        fi
+    fi
+
+    # Get FPM status
+    local fpm_status=""
+    if [[ -n "$version" ]]; then
+        if pgrep -f "php-fpm${version}\|php${version}-fpm" &>/dev/null; then
+            fpm_status="${GREEN}●${RESET}"
+        else
+            fpm_status="${RED}●${RESET}"
+        fi
+    fi
+
+    echo ""
+    gum style \
+        --border double \
+        --border-foreground 212 \
+        --padding "0 2" \
+        --margin "0 1" \
+        --bold \
+        "PHPVM Dashboard v${PHPVM_VERSION}" \
+        "PHP ${full_version:-$version}${project_info}" \
+        "nginx $nginx_status  fpm $fpm_status"
+    echo ""
+}
+
+print_hotkey_menu() {
+    local framework="$1"
+
+    # Calculate available height
+    local menu_height=$((TERM_LINES - 15))
+    [[ $menu_height -lt 10 ]] && menu_height=10
+
+    # Build menu items with hotkeys
+    local items=()
+
+    # Version Management
+    items+=("${BOLD}${CYAN}Version Management${RESET}")
+    items+=("  ${YELLOW}[u]${RESET} use         Switch PHP version")
+    items+=("  ${YELLOW}[i]${RESET} install     Install PHP or extension")
+    items+=("  ${YELLOW}[l]${RESET} list        List installed versions")
+
+    items+=("")
+    items+=("${BOLD}${CYAN}Configuration${RESET}")
+    items+=("  ${YELLOW}[c]${RESET} config      Edit PHP configuration")
+    items+=("  ${YELLOW}[f]${RESET} fpm         Manage PHP-FPM")
+    items+=("  ${YELLOW}[n]${RESET} nginx       Nginx management")
+
+    items+=("")
+    items+=("${BOLD}${CYAN}Logs & Monitoring${RESET}")
+    items+=("  ${YELLOW}[g]${RESET} logs        Log viewer")
+    items+=("  ${YELLOW}[t]${RESET} tail        Follow logs")
+    items+=("  ${YELLOW}[p]${RESET} processes   Backend processes")
+
+    # Framework-specific
+    if [[ -n "$framework" ]]; then
+        items+=("")
+        items+=("${BOLD}${CYAN}$(get_framework_display_name "$framework") Commands${RESET}")
+        items+=("  ${YELLOW}[s]${RESET} serve       Start dev server")
+        items+=("  ${YELLOW}[w]${RESET} worker      Queue workers")
+        items+=("  ${YELLOW}[r]${RESET} cron        Scheduled tasks")
+
+        case "$framework" in
+            laravel)
+                items+=("  ${YELLOW}[a]${RESET} artisan     Run artisan command")
+                has_horizon 2>/dev/null && items+=("  ${YELLOW}[H]${RESET} horizon     Start Horizon")
+                has_octane 2>/dev/null && items+=("  ${YELLOW}[o]${RESET} octane      Start Octane")
+                ;;
+            symfony)
+                items+=("  ${YELLOW}[a]${RESET} console     Run console command")
+                ;;
+            yii)
+                items+=("  ${YELLOW}[a]${RESET} yii         Run yii command")
+                ;;
+        esac
+    fi
+
+    items+=("")
+    items+=("${BOLD}${CYAN}Other${RESET}")
+    items+=("  ${YELLOW}[?]${RESET} help        Show help")
+    items+=("  ${YELLOW}[U]${RESET} update      Update PHPVM")
+    items+=("  ${YELLOW}[q]${RESET} quit        Exit dashboard")
+
+    # Print items
+    for item in "${items[@]}"; do
+        echo -e "$item"
+    done
+}
+
+print_footer() {
+    local footer_line=$((TERM_LINES - 1))
+
+    echo ""
+    echo "${DIM}Press hotkey to select │ Ctrl-C to exit │ ? for help${RESET}"
+}
+
+handle_hotkey() {
+    local key="$1"
+    local framework="$2"
+
+    show_cursor
+
+    case "$key" in
+        # Ctrl-C or q to quit
+        $'\x03'|q|Q)
+            return 1
+            ;;
+
+        # Version Management
+        u|U)
+            clear_screen
+            cmd_use
+            wait_for_key
+            ;;
+        i|I)
+            clear_screen
+            cmd_install
+            wait_for_key
+            ;;
+        l|L)
+            clear_screen
+            cmd_list
+            wait_for_key
+            ;;
+
+        # Configuration
+        c|C)
+            clear_screen
+            cmd_config
+            wait_for_key
+            ;;
+        f|F)
+            clear_screen
+            cmd_fpm
+            wait_for_key
+            ;;
+        n|N)
+            clear_screen
+            nginx_submenu
+            ;;
+
+        # Logs & Monitoring
+        g|G)
+            clear_screen
+            cmd_logs
+            ;;
+        t|T)
+            clear_screen
+            tail_submenu
+            ;;
+        p|P)
+            clear_screen
+            show_backend_processes
+            wait_for_key
+            ;;
+
+        # Framework commands
+        s|S)
+            if [[ -n "$framework" ]]; then
+                clear_screen
+                cmd_serve
+                wait_for_key
+            fi
+            ;;
+        w|W)
+            if [[ -n "$framework" ]]; then
+                clear_screen
+                cmd_worker
+                wait_for_key
+            fi
+            ;;
+        r|R)
+            if [[ -n "$framework" ]]; then
+                clear_screen
+                cmd_cron
+                wait_for_key
+            fi
+            ;;
+        a|A)
+            if [[ -n "$framework" ]]; then
+                clear_screen
+                run_framework_console_interactive "$framework"
+                wait_for_key
+            fi
+            ;;
+        H)
+            if [[ "$framework" == "laravel" ]] && has_horizon 2>/dev/null; then
+                clear_screen
+                run_horizon
+            fi
+            ;;
+        o|O)
+            if [[ "$framework" == "laravel" ]] && has_octane 2>/dev/null; then
+                clear_screen
+                run_octane
+            fi
+            ;;
+
+        # Other
+        \?|h)
+            clear_screen
+            show_help
+            wait_for_key
+            ;;
+        U)
+            clear_screen
+            cmd_self_update
+            wait_for_key
+            ;;
+
+        # Info shortcut
+        "")
+            clear_screen
+            cmd_info
+            wait_for_key
+            ;;
+    esac
+
+    return 0
+}
+
+wait_for_key() {
+    echo ""
+    echo "${DIM}Press any key to continue...${RESET}"
+    read -rsn1
+}
+
+nginx_submenu() {
+    while true; do
+        clear_screen
+        echo ""
+        gum style \
+            --border rounded \
+            --border-foreground 99 \
+            --padding "0 2" \
+            --bold \
+            "Nginx Management"
+        echo ""
+
+        echo "${BOLD}${CYAN}Commands${RESET}"
+        echo "  ${YELLOW}[i]${RESET} info        Show configuration info"
+        echo "  ${YELLOW}[v]${RESET} view        View configuration"
+        echo "  ${YELLOW}[e]${RESET} edit        Edit configuration"
+        echo "  ${YELLOW}[g]${RESET} generate    Generate new config"
+        echo "  ${YELLOW}[r]${RESET} reload      Reload nginx"
+        echo "  ${YELLOW}[R]${RESET} restart     Restart nginx"
+        echo "  ${YELLOW}[t]${RESET} test        Test configuration"
+        echo "  ${YELLOW}[p]${RESET} processes   Show backends"
+        echo "  ${YELLOW}[m]${RESET} templates   Manage templates"
+        echo ""
+        echo "  ${YELLOW}[b]${RESET} back        Return to dashboard"
+        echo "  ${YELLOW}[q]${RESET} quit        Exit"
+        echo ""
+        echo "${DIM}Press hotkey to select${RESET}"
+
+        local key
+        key=$(read_key)
+
+        case "$key" in
+            $'\x03'|q|Q) return 1 ;;
+            b|B|\x1b) return 0 ;;
+            i|I)
+                show_nginx_info
+                wait_for_key
+                ;;
+            v|V)
+                view_nginx_config
+                wait_for_key
+                ;;
+            e|E)
+                local config_file
+                config_file=$(select_nginx_config 2>/dev/null)
+                [[ -n "$config_file" ]] && run_privileged "${EDITOR:-nano}" "$config_file"
+                ;;
+            g|G)
+                generate_nginx_config
+                wait_for_key
+                ;;
+            r)
+                nginx_reload
+                wait_for_key
+                ;;
+            R)
+                nginx_restart
+                wait_for_key
+                ;;
+            t|T)
+                run_privileged nginx -t
+                wait_for_key
+                ;;
+            p|P)
+                show_backend_processes
+                wait_for_key
+                ;;
+            m|M)
+                templates_submenu
+                ;;
+        esac
+    done
+}
+
+templates_submenu() {
+    while true; do
+        clear_screen
+        echo ""
+        gum style \
+            --border rounded \
+            --border-foreground 99 \
+            --padding "0 2" \
+            --bold \
+            "Template Management"
+        echo ""
+
+        echo "  ${YELLOW}[l]${RESET} list        List templates"
+        echo "  ${YELLOW}[a]${RESET} add         Add template"
+        echo "  ${YELLOW}[e]${RESET} edit        Edit template"
+        echo "  ${YELLOW}[d]${RESET} delete      Delete template"
+        echo ""
+        echo "  ${YELLOW}[b]${RESET} back        Return"
+        echo ""
+        echo "${DIM}Press hotkey to select${RESET}"
+
+        local key
+        key=$(read_key)
+
+        case "$key" in
+            $'\x03'|q|Q) return 1 ;;
+            b|B|\x1b) return 0 ;;
+            l|L)
+                list_custom_templates
+                wait_for_key
+                ;;
+            a|A)
+                add_custom_template
+                wait_for_key
+                ;;
+            e|E)
+                edit_custom_template
+                wait_for_key
+                ;;
+            d|D)
+                delete_custom_template
+                wait_for_key
+                ;;
+        esac
+    done
+}
+
+tail_submenu() {
+    while true; do
+        clear_screen
+        echo ""
+        gum style \
+            --border rounded \
+            --border-foreground 99 \
+            --padding "0 2" \
+            --bold \
+            "Tail Logs"
+        echo ""
+
+        echo "  ${YELLOW}[1]${RESET} app         Application log"
+        echo "  ${YELLOW}[2]${RESET} access      Nginx access log"
+        echo "  ${YELLOW}[3]${RESET} error       Nginx error log"
+        echo "  ${YELLOW}[4]${RESET} worker      Supervisor log"
+        echo "  ${YELLOW}[5]${RESET} fpm         PHP-FPM log"
+        echo "  ${YELLOW}[a]${RESET} all         All logs"
+        echo "  ${YELLOW}[s]${RESET} split       Split screen (tmux)"
+        echo ""
+        echo "  ${YELLOW}[b]${RESET} back        Return"
+        echo ""
+        echo "${DIM}Press number or letter to select${RESET}"
+
+        local key
+        key=$(read_key)
+
+        case "$key" in
+            $'\x03'|q|Q) return 1 ;;
+            b|B|\x1b) return 0 ;;
+            1)
+                follow_log "app"
+                ;;
+            2)
+                follow_log "access"
+                ;;
+            3)
+                follow_log "error"
+                ;;
+            4)
+                follow_log "worker"
+                ;;
+            5)
+                follow_log "fpm"
+                ;;
+            a|A)
+                follow_all_logs
+                ;;
+            s|S)
+                split_screen_viewer
+                ;;
+        esac
+    done
+}
+
+run_framework_console_interactive() {
+    local framework="$1"
+    local php_bin
+    php_bin=$(get_php_binary)
+
+    local prompt=""
+    local cmd_prefix=""
+
+    case "$framework" in
+        laravel)
+            prompt="artisan command:"
+            cmd_prefix="artisan"
+            ;;
+        symfony)
+            prompt="console command:"
+            cmd_prefix="bin/console"
+            ;;
+        yii)
+            prompt="yii command:"
+            cmd_prefix="yii"
+            ;;
+    esac
+
+    local cmd
+    cmd=$(gum_input "$prompt" "")
+
+    if [[ -n "$cmd" ]]; then
+        "$php_bin" $cmd_prefix $cmd
+    fi
+}
+
+run_horizon() {
+    local php_bin
+    php_bin=$(get_php_binary)
+
+    echo ""
+    info_log "Starting Laravel Horizon..."
+    echo "${DIM}Press Ctrl+C to stop${RESET}"
+    echo ""
+
+    "$php_bin" artisan horizon
+}
+
+run_octane() {
+    serve_octane "$(get_php_binary)"
+}
+
+fallback_menu() {
+    local framework
+    framework=$(detect_framework 2>/dev/null)
+
+    while true; do
+        clear
+        print_header
+
+        echo ""
+        echo "${BOLD}Commands:${RESET}"
+        echo "  1) Switch PHP version"
+        echo "  2) Install PHP/extension"
+        echo "  3) List versions"
+        echo "  4) PHP info"
+        echo "  5) Edit config"
+        echo "  6) Manage FPM"
+        echo "  7) Nginx management"
+        echo "  8) View logs"
+
+        if [[ -n "$framework" ]]; then
+            echo ""
+            echo "${BOLD}$(get_framework_display_name "$framework"):${RESET}"
+            echo "  s) Start dev server"
+            echo "  w) Manage workers"
+            echo "  c) Manage cron"
+        fi
+
+        echo ""
+        echo "  h) Help"
+        echo "  q) Quit"
+        echo ""
+
+        local choice
+        read -rp "Select: " choice
+
+        case "$choice" in
+            1) cmd_use; read -rp "Press Enter..." ;;
+            2) cmd_install; read -rp "Press Enter..." ;;
+            3) cmd_list; read -rp "Press Enter..." ;;
+            4) cmd_info; read -rp "Press Enter..." ;;
+            5) cmd_config; read -rp "Press Enter..." ;;
+            6) cmd_fpm; read -rp "Press Enter..." ;;
+            7) cmd_nginx; read -rp "Press Enter..." ;;
+            8) cmd_logs; read -rp "Press Enter..." ;;
+            s|S) [[ -n "$framework" ]] && { cmd_serve; read -rp "Press Enter..."; } ;;
+            w|W) [[ -n "$framework" ]] && { cmd_worker; read -rp "Press Enter..."; } ;;
+            c|C) [[ -n "$framework" ]] && { cmd_cron; read -rp "Press Enter..."; } ;;
+            h|H) show_help; read -rp "Press Enter..." ;;
+            q|Q) break ;;
+        esac
+    done
+}
+
+hotkey_select() {
+    local header="$1"
+    shift
+    local items=("$@")
+    local count=${#items[@]}
+
+    if [[ $count -eq 0 ]]; then
+        return 1
+    fi
+
+    echo ""
+    echo "${BOLD}$header${RESET}"
+    echo ""
+
+    local i=1
+    for item in "${items[@]}"; do
+        if [[ $i -le 9 ]]; then
+            echo "  ${YELLOW}[$i]${RESET} $item"
+        else
+            echo "      $item"
+        fi
+        ((i++))
+    done
+
+    echo ""
+    echo "  ${YELLOW}[b]${RESET} Back/Cancel"
+    echo ""
+    echo "${DIM}Press number to select${RESET}"
+
+    local key
+    key=$(read_key)
+
+    case "$key" in
+        $'\x03'|b|B|q|Q|\x1b)
+            return 1
+            ;;
+        [1-9])
+            local idx=$((key - 1))
+            if [[ $idx -lt $count ]]; then
+                echo "${items[$idx]}"
+                return 0
+            fi
+            ;;
+    esac
+
+    return 1
+}
+
+hotkey_confirm() {
+    local question="$1"
+
+    echo ""
+    echo "$question"
+    echo ""
+    echo "  ${YELLOW}[y]${RESET} Yes"
+    echo "  ${YELLOW}[n]${RESET} No"
+    echo ""
+
+    local key
+    key=$(read_key)
+
+    case "$key" in
+        y|Y) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# === nginx.sh ===
+
+NGINX_CONF_DIRS=(
+    "/etc/nginx/sites-enabled"
+    "/etc/nginx/conf.d"
+    "/etc/nginx/sites-available"
+)
+
+NGINX_TEMPLATE_DIR="${HOME}/.phpvm/nginx-templates"
+
+BACKEND_FPM="php-fpm"
+BACKEND_OCTANE_SWOOLE="octane-swoole"
+BACKEND_OCTANE_ROADRUNNER="octane-roadrunner"
+BACKEND_OCTANE_FRANKENPHP="octane-frankenphp"
+BACKEND_SWOOLE="swoole"
+BACKEND_ROADRUNNER="roadrunner"
+BACKEND_FRANKENPHP="frankenphp"
+BACKEND_CUSTOM="custom"
+BACKEND_UNKNOWN="unknown"
+
+init_nginx_templates() {
+    mkdir -p "$NGINX_TEMPLATE_DIR"
+}
+
+find_all_nginx_configs() {
+    local project_root="${1:-$PWD}"
+    project_root=$(cd "$project_root" 2>/dev/null && pwd)
+
+    local found_configs=()
+
+    for conf_dir in "${NGINX_CONF_DIRS[@]}"; do
+        [[ ! -d "$conf_dir" ]] && continue
+
+        while IFS= read -r -d '' conf_file; do
+            if grep -q "$project_root" "$conf_file" 2>/dev/null; then
+                found_configs+=("$conf_file")
+            fi
+        done < <(find "$conf_dir" -type f \( -name "*.conf" -o ! -name "*.*" \) -print0 2>/dev/null)
+    done
+
+    printf '%s\n' "${found_configs[@]}"
+}
+
+find_nginx_config() {
+    local project_root="${1:-$PWD}"
+    local all_configs
+    all_configs=$(find_all_nginx_configs "$project_root")
+
+    if [[ -z "$all_configs" ]]; then
+        return 1
+    fi
+
+    local config_count
+    config_count=$(echo "$all_configs" | wc -l)
+
+    if [[ "$config_count" -eq 1 ]]; then
+        echo "$all_configs"
+        return 0
+    fi
+
+    # Multiple configs - return first one (use select_nginx_config for interactive)
+    echo "$all_configs" | head -1
+}
+
+select_nginx_config() {
+    local project_root="${1:-$PWD}"
+    local all_configs
+    all_configs=$(find_all_nginx_configs "$project_root")
+
+    if [[ -z "$all_configs" ]]; then
+        error "No nginx configurations found for this project"
+        return 1
+    fi
+
+    local config_count
+    config_count=$(echo "$all_configs" | wc -l)
+
+    if [[ "$config_count" -eq 1 ]]; then
+        echo "$all_configs"
+        return 0
+    fi
+
+    # Multiple configs - let user select
+    if [[ "$UI_MODE" == "gum" ]]; then
+        local choice
+        choice=$(echo "$all_configs" | gum filter \
+            --header "Multiple configs found. Select one:" \
+            --height 10)
+        echo "$choice"
+    else
+        echo "Multiple nginx configurations found:"
+        local i=1
+        while IFS= read -r config; do
+            echo "  $i) $config"
+            ((i++))
+        done <<< "$all_configs"
+
+        local choice
+        read -rp "Select config (1-$config_count): " choice
+
+        echo "$all_configs" | sed -n "${choice}p"
+    fi
+}
+
+parse_server_name() {
+    local config_file="$1"
+    [[ ! -f "$config_file" ]] && return 1
+
+    grep -oP 'server_name\s+\K[^;]+' "$config_file" 2>/dev/null | head -1 | tr -d ' '
+}
+
+parse_listen_port() {
+    local config_file="$1"
+    [[ ! -f "$config_file" ]] && return 1
+
+    local port
+    port=$(grep -oP 'listen\s+\K\d+' "$config_file" 2>/dev/null | head -1)
+    echo "${port:-80}"
+}
+
+parse_access_log() {
+    local config_file="$1"
+    [[ ! -f "$config_file" ]] && return 1
+
+    local log_path
+    log_path=$(grep -oP 'access_log\s+\K[^\s;]+' "$config_file" 2>/dev/null | head -1)
+
+    if [[ -n "$log_path" && "$log_path" != "off" ]]; then
+        echo "$log_path"
+    else
+        echo "/var/log/nginx/access.log"
+    fi
+}
+
+parse_error_log() {
+    local config_file="$1"
+    [[ ! -f "$config_file" ]] && return 1
+
+    local log_path
+    log_path=$(grep -oP 'error_log\s+\K[^\s;]+' "$config_file" 2>/dev/null | head -1)
+
+    if [[ -n "$log_path" && "$log_path" != "off" ]]; then
+        echo "$log_path"
+    else
+        echo "/var/log/nginx/error.log"
+    fi
+}
+
+detect_backend_type() {
+    local config_file="$1"
+    [[ ! -f "$config_file" ]] && echo "$BACKEND_UNKNOWN" && return 1
+
+    local config_content
+    config_content=$(cat "$config_file")
+
+    # Check for FrankenPHP
+    if echo "$config_content" | grep -qE 'proxy_pass.*:8443|proxy_pass.*frankenphp'; then
+        echo "$BACKEND_FRANKENPHP"
+        return 0
+    fi
+
+    # Check for RoadRunner
+    if echo "$config_content" | grep -qE 'proxy_pass.*:8080|proxy_pass.*roadrunner'; then
+        echo "$BACKEND_ROADRUNNER"
+        return 0
+    fi
+
+    # Check for Swoole/Octane
+    if echo "$config_content" | grep -qE 'proxy_pass.*:(8000|9501)|proxy_pass.*swoole|proxy_pass.*octane'; then
+        if is_framework_project && [[ "$(detect_framework)" == "laravel" ]] && has_octane 2>/dev/null; then
+            local octane_driver
+            octane_driver=$(get_octane_driver)
+            case "$octane_driver" in
+                swoole) echo "$BACKEND_OCTANE_SWOOLE" ;;
+                roadrunner) echo "$BACKEND_OCTANE_ROADRUNNER" ;;
+                frankenphp) echo "$BACKEND_OCTANE_FRANKENPHP" ;;
+                *) echo "$BACKEND_SWOOLE" ;;
+            esac
+            return 0
+        fi
+        echo "$BACKEND_SWOOLE"
+        return 0
+    fi
+
+    # Check for PHP-FPM
+    if echo "$config_content" | grep -qE 'fastcgi_pass'; then
+        echo "$BACKEND_FPM"
+        return 0
+    fi
+
+    echo "$BACKEND_UNKNOWN"
+    return 1
+}
+
+get_octane_driver() {
+    if [[ -f ".env" ]]; then
+        local driver
+        driver=$(grep -oP 'OCTANE_SERVER=\K\w+' .env 2>/dev/null)
+        [[ -n "$driver" ]] && echo "$driver" && return 0
+    fi
+
+    if [[ -f "config/octane.php" ]]; then
+        local driver
+        driver=$(grep -oP "'server'\s*=>\s*\K\w+" "config/octane.php" 2>/dev/null | head -1)
+        [[ -n "$driver" ]] && echo "$driver" && return 0
+    fi
+
+    echo "swoole"
+}
+
+parse_fpm_backend() {
+    local config_file="$1"
+    [[ ! -f "$config_file" ]] && return 1
+
+    grep -oP 'fastcgi_pass\s+\K[^;]+' "$config_file" 2>/dev/null | head -1 | tr -d ' '
+}
+
+parse_proxy_backend() {
+    local config_file="$1"
+    [[ ! -f "$config_file" ]] && return 1
+
+    grep -oP 'proxy_pass\s+\K[^;]+' "$config_file" 2>/dev/null | head -1 | tr -d ' '
+}
+
+get_backend_display_name() {
+    local backend_type="$1"
+
+    case "$backend_type" in
+        "$BACKEND_FPM") echo "PHP-FPM" ;;
+        "$BACKEND_OCTANE_SWOOLE") echo "Laravel Octane (Swoole)" ;;
+        "$BACKEND_OCTANE_ROADRUNNER") echo "Laravel Octane (RoadRunner)" ;;
+        "$BACKEND_OCTANE_FRANKENPHP") echo "Laravel Octane (FrankenPHP)" ;;
+        "$BACKEND_SWOOLE") echo "Swoole" ;;
+        "$BACKEND_ROADRUNNER") echo "RoadRunner" ;;
+        "$BACKEND_FRANKENPHP") echo "FrankenPHP" ;;
+        "$BACKEND_CUSTOM") echo "Custom" ;;
+        *) echo "Unknown" ;;
+    esac
+}
+
+
+get_fpm_pools() {
+    local pools=()
+
+    # Check for FPM sockets
+    for socket in /var/run/php/php*-fpm*.sock /run/php/php*-fpm*.sock; do
+        [[ -S "$socket" ]] && pools+=("unix:$socket")
+    done
+
+    # Check for FPM TCP ports (common: 9000, 9001, etc.)
+    for port in 9000 9001 9002 9003; do
+        if netstat -tuln 2>/dev/null | grep -q ":$port " || \
+           ss -tuln 2>/dev/null | grep -q ":$port "; then
+            pools+=("127.0.0.1:$port")
+        fi
+    done
+
+    printf '%s\n' "${pools[@]}" | sort -u
+}
+
+get_fpm_pools_for_version() {
+    local version="$1"
+    local pools=()
+
+    # Socket pattern for version
+    for socket in /var/run/php/php${version}-fpm*.sock /run/php/php${version}-fpm*.sock; do
+        [[ -S "$socket" ]] && pools+=("unix:$socket")
+    done
+
+    printf '%s\n' "${pools[@]}"
+}
+
+select_fpm_pool() {
+    local pools
+    pools=$(get_fpm_pools)
+
+    if [[ -z "$pools" ]]; then
+        warn "No PHP-FPM pools found"
+        local custom
+        custom=$(gum_input "Enter custom FPM socket/address:" "unix:/var/run/php/php-fpm.sock")
+        echo "$custom"
+        return
+    fi
+
+    if [[ "$UI_MODE" == "gum" ]]; then
+        local options=()
+        while IFS= read -r pool; do
+            options+=("$pool")
+        done <<< "$pools"
+        options+=("Custom...")
+
+        local choice
+        choice=$(printf '%s\n' "${options[@]}" | gum filter \
+            --header "Select PHP-FPM pool:" \
+            --height 10)
+
+        if [[ "$choice" == "Custom..." ]]; then
+            gum_input "Enter custom FPM socket/address:" "unix:/var/run/php/php-fpm.sock"
+        else
+            echo "$choice"
+        fi
+    else
+        echo "Available PHP-FPM pools:"
+        local i=1
+        while IFS= read -r pool; do
+            echo "  $i) $pool"
+            ((i++))
+        done <<< "$pools"
+        echo "  $i) Custom..."
+
+        local choice
+        read -rp "Select pool: " choice
+
+        local pool_count
+        pool_count=$(echo "$pools" | wc -l)
+
+        if [[ "$choice" -gt "$pool_count" ]]; then
+            read -rp "Enter custom FPM socket/address: " custom
+            echo "$custom"
+        else
+            echo "$pools" | sed -n "${choice}p"
+        fi
+    fi
+}
+
+
+get_project_supervisor_services() {
+    local project_root="${1:-$PWD}"
+    local project_id
+    project_id=$(get_project_id "$project_root" 2>/dev/null)
+
+    if [[ -z "$project_id" ]]; then
+        return 1
+    fi
+
+    # Find supervisor configs for this project
+    local configs=()
+    for conf in /etc/supervisor/conf.d/${project_id}*.conf; do
+        [[ -f "$conf" ]] && configs+=("$conf")
+    done
+
+    if [[ ${#configs[@]} -eq 0 ]]; then
+        return 1
+    fi
+
+    # Extract program names and ports
+    for conf in "${configs[@]}"; do
+        local program
+        program=$(grep -oP '\[program:\K[^\]]+' "$conf" 2>/dev/null)
+
+        # Try to detect port from command
+        local port
+        port=$(grep -oP 'port[=:]\s*\K\d+|--port[=\s]+\K\d+|-p\s+\K\d+' "$conf" 2>/dev/null | head -1)
+
+        if [[ -n "$program" ]]; then
+            if [[ -n "$port" ]]; then
+                echo "$program|$port"
+            else
+                echo "$program|8000"  # Default port
+            fi
+        fi
+    done
+}
+
+select_supervisor_service() {
+    local services
+    services=$(get_project_supervisor_services)
+
+    if [[ -z "$services" ]]; then
+        return 1
+    fi
+
+    local options=()
+    local ports=()
+
+    while IFS='|' read -r name port; do
+        options+=("$name (port $port)")
+        ports+=("$port")
+    done <<< "$services"
+
+    if [[ "$UI_MODE" == "gum" ]]; then
+        local choice
+        choice=$(printf '%s\n' "${options[@]}" | gum filter \
+            --header "Select supervisor service:" \
+            --height 10)
+
+        # Extract port from choice
+        echo "$choice" | grep -oP 'port \K\d+'
+    else
+        echo "Available supervisor services:"
+        local i=1
+        for opt in "${options[@]}"; do
+            echo "  $i) $opt"
+            ((i++))
+        done
+
+        local choice
+        read -rp "Select service: " choice
+        echo "${ports[$((choice-1))]}"
+    fi
+}
+
+
+is_octane_running() {
+    pgrep -f "artisan octane" &>/dev/null || \
+    pgrep -f "swoole" &>/dev/null || \
+    pgrep -f "roadrunner" &>/dev/null || \
+    pgrep -f "frankenphp" &>/dev/null
+}
+
+get_running_backends() {
+    local backends=()
+
+    # Check Swoole
+    if pgrep -f "swoole" &>/dev/null; then
+        local pid port
+        pid=$(pgrep -f "swoole" | head -1)
+        port=$(ss -tlnp 2>/dev/null | grep "pid=$pid" | grep -oP ':\K\d+' | head -1)
+        backends+=("Swoole|$pid|${port:-N/A}")
+    fi
+
+    # Check RoadRunner
+    if pgrep -f "roadrunner\|rr " &>/dev/null; then
+        local pid port
+        pid=$(pgrep -f "roadrunner\|rr " | head -1)
+        port=$(ss -tlnp 2>/dev/null | grep "pid=$pid" | grep -oP ':\K\d+' | head -1)
+        backends+=("RoadRunner|$pid|${port:-N/A}")
+    fi
+
+    # Check FrankenPHP
+    if pgrep -f "frankenphp" &>/dev/null; then
+        local pid port
+        pid=$(pgrep -f "frankenphp" | head -1)
+        port=$(ss -tlnp 2>/dev/null | grep "pid=$pid" | grep -oP ':\K\d+' | head -1)
+        backends+=("FrankenPHP|$pid|${port:-N/A}")
+    fi
+
+    # Check Octane
+    if pgrep -f "artisan octane" &>/dev/null; then
+        local pid port
+        pid=$(pgrep -f "artisan octane" | head -1)
+        port=$(ss -tlnp 2>/dev/null | grep "pid=$pid" | grep -oP ':\K\d+' | head -1)
+        backends+=("Octane|$pid|${port:-N/A}")
+    fi
+
+    printf '%s\n' "${backends[@]}"
+}
+
+show_backend_processes() {
+    local backends
+    backends=$(get_running_backends)
+
+    if [[ -z "$backends" ]]; then
+        echo "No backend processes running"
+        return 1
+    fi
+
+    echo "${BOLD}Running Backend Processes${RESET}"
+    echo ""
+    printf "  %-15s %-10s %-10s\n" "BACKEND" "PID" "PORT"
+    echo "  ----------------------------------------"
+
+    while IFS='|' read -r name pid port; do
+        printf "  %-15s %-10s %-10s\n" "$name" "$pid" "$port"
+    done <<< "$backends"
+}
+
+
+nginx_status() {
+    if command -v systemctl &>/dev/null; then
+        systemctl is-active nginx 2>/dev/null
+    elif command -v service &>/dev/null; then
+        service nginx status &>/dev/null && echo "active" || echo "inactive"
+    else
+        pgrep -x nginx &>/dev/null && echo "active" || echo "inactive"
+    fi
+}
+
+nginx_reload() {
+    info_log "Reloading nginx..."
+
+    if ! run_privileged nginx -t 2>/dev/null; then
+        error "Nginx configuration test failed"
+        return 1
+    fi
+
+    if command -v systemctl &>/dev/null; then
+        run_privileged systemctl reload nginx
+    elif command -v service &>/dev/null; then
+        run_privileged service nginx reload
+    else
+        run_privileged nginx -s reload
+    fi
+
+    [[ $? -eq 0 ]] && success "Nginx reloaded" || { error "Failed to reload nginx"; return 1; }
+}
+
+nginx_restart() {
+    info_log "Restarting nginx..."
+
+    if command -v systemctl &>/dev/null; then
+        run_privileged systemctl restart nginx
+    elif command -v service &>/dev/null; then
+        run_privileged service nginx restart
+    else
+        run_privileged nginx -s stop
+        sleep 1
+        run_privileged nginx
+    fi
+
+    [[ $? -eq 0 ]] && success "Nginx restarted" || { error "Failed to restart nginx"; return 1; }
+}
+
+
+generate_laravel_template() {
+    local server_name="$1"
+    local port="$2"
+    local root_path="$3"
+    local backend="$4"
+    local backend_type="$5"
+
+    local fastcgi_or_proxy=""
+
+    if [[ "$backend_type" == "$BACKEND_FPM" ]]; then
+        fastcgi_or_proxy="
+        location ~ \\.php\$ {
+            fastcgi_pass $backend;
+            fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
+            include fastcgi_params;
+            fastcgi_hide_header X-Powered-By;
+        }"
+    else
+        local proxy_port="${backend##*:}"
+        fastcgi_or_proxy="
+        location / {
+            proxy_pass http://127.0.0.1:$proxy_port;
+            proxy_http_version 1.1;
+            proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto \$scheme;
+            proxy_set_header Upgrade \$http_upgrade;
+            proxy_set_header Connection \"upgrade\";
+            proxy_read_timeout 60s;
+            proxy_buffering off;
+        }"
+    fi
+
+    cat << EOF
+server {
+    listen $port;
+    listen [::]:$port;
+    server_name $server_name;
+    root $root_path/public;
+
+    add_header X-Frame-Options "SAMEORIGIN";
+    add_header X-Content-Type-Options "nosniff";
+
+    index index.php;
+
+    charset utf-8;
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+    location = /favicon.ico { access_log off; log_not_found off; }
+    location = /robots.txt  { access_log off; log_not_found off; }
+
+    error_page 404 /index.php;
+$fastcgi_or_proxy
+
+    location ~ /\\.(?!well-known).* {
+        deny all;
+    }
+
+    access_log /var/log/nginx/${server_name}-access.log;
+    error_log /var/log/nginx/${server_name}-error.log;
+}
+EOF
+}
+
+generate_symfony_template() {
+    local server_name="$1"
+    local port="$2"
+    local root_path="$3"
+    local backend="$4"
+    local backend_type="$5"
+
+    local fastcgi_or_proxy=""
+
+    if [[ "$backend_type" == "$BACKEND_FPM" ]]; then
+        fastcgi_or_proxy="
+        location ~ ^/index\\.php(/|\$) {
+            fastcgi_pass $backend;
+            fastcgi_split_path_info ^(.+\\.php)(/.*)$;
+            include fastcgi_params;
+            fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
+            fastcgi_param DOCUMENT_ROOT \$realpath_root;
+            internal;
+        }
+
+        location ~ \\.php\$ {
+            return 404;
+        }"
+    else
+        local proxy_port="${backend##*:}"
+        fastcgi_or_proxy="
+        location / {
+            proxy_pass http://127.0.0.1:$proxy_port;
+            proxy_http_version 1.1;
+            proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto \$scheme;
+        }"
+    fi
+
+    cat << EOF
+server {
+    listen $port;
+    listen [::]:$port;
+    server_name $server_name;
+    root $root_path/public;
+
+    location / {
+        try_files \$uri /index.php\$is_args\$args;
+    }
+$fastcgi_or_proxy
+
+    access_log /var/log/nginx/${server_name}-access.log;
+    error_log /var/log/nginx/${server_name}-error.log;
+}
+EOF
+}
+
+generate_yii_template() {
+    local server_name="$1"
+    local port="$2"
+    local root_path="$3"
+    local backend="$4"
+    local backend_type="$5"
+
+    local fastcgi_or_proxy=""
+
+    if [[ "$backend_type" == "$BACKEND_FPM" ]]; then
+        fastcgi_or_proxy="
+        location ~ \\.php\$ {
+            include fastcgi_params;
+            fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+            fastcgi_pass $backend;
+            try_files \$uri =404;
+        }"
+    else
+        local proxy_port="${backend##*:}"
+        fastcgi_or_proxy="
+        location / {
+            proxy_pass http://127.0.0.1:$proxy_port;
+            proxy_http_version 1.1;
+            proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto \$scheme;
+        }"
+    fi
+
+    cat << EOF
+server {
+    listen $port;
+    listen [::]:$port;
+    server_name $server_name;
+    root $root_path/web;
+    index index.php;
+
+    charset utf-8;
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$args;
+    }
+
+    location ~ ^/assets/.*\\.php\$ {
+        deny all;
+    }
+$fastcgi_or_proxy
+
+    location ~ /\\.(ht|svn|git) {
+        deny all;
+    }
+
+    access_log /var/log/nginx/${server_name}-access.log;
+    error_log /var/log/nginx/${server_name}-error.log;
+}
+EOF
+}
+
+generate_generic_template() {
+    local server_name="$1"
+    local port="$2"
+    local root_path="$3"
+    local backend="$4"
+    local backend_type="$5"
+
+    local fastcgi_or_proxy=""
+
+    if [[ "$backend_type" == "$BACKEND_FPM" ]]; then
+        fastcgi_or_proxy="
+        location ~ \\.php\$ {
+            fastcgi_pass $backend;
+            fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+            include fastcgi_params;
+        }"
+    else
+        local proxy_port="${backend##*:}"
+        fastcgi_or_proxy="
+        location / {
+            proxy_pass http://127.0.0.1:$proxy_port;
+            proxy_http_version 1.1;
+            proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto \$scheme;
+        }"
+    fi
+
+    cat << EOF
+server {
+    listen $port;
+    listen [::]:$port;
+    server_name $server_name;
+    root $root_path;
+    index index.php index.html;
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+$fastcgi_or_proxy
+
+    location ~ /\\. {
+        deny all;
+    }
+
+    access_log /var/log/nginx/${server_name}-access.log;
+    error_log /var/log/nginx/${server_name}-error.log;
+}
+EOF
+}
+
+
+list_custom_templates() {
+    init_nginx_templates
+
+    local templates
+    templates=$(find "$NGINX_TEMPLATE_DIR" -maxdepth 1 -name "*.conf" -type f 2>/dev/null)
+
+    if [[ -z "$templates" ]]; then
+        echo "No custom templates found"
+        echo "Templates directory: $NGINX_TEMPLATE_DIR"
+        return 1
+    fi
+
+    echo "${BOLD}Custom Nginx Templates${RESET}"
+    echo ""
+
+    while IFS= read -r template; do
+        local name
+        name=$(basename "$template" .conf)
+        echo "  - $name"
+    done <<< "$templates"
+}
+
+add_custom_template() {
+    init_nginx_templates
+
+    local name
+    name=$(gum_input "Template name:" "my-template")
+
+    [[ -z "$name" ]] && return
+
+    local template_file="$NGINX_TEMPLATE_DIR/${name}.conf"
+
+    if [[ -f "$template_file" ]]; then
+        if ! gum_confirm "Template '$name' exists. Overwrite?"; then
+            return
+        fi
+    fi
+
+    local editor="${EDITOR:-nano}"
+
+    # Create template with placeholder
+    cat > "$template_file" << 'EOF'
+
+server {
+    listen {{PORT}};
+    listen [::]:{{PORT}};
+    server_name {{SERVER_NAME}};
+    root {{ROOT_PATH}}/public;
+
+    # Add your configuration here
+
+    access_log /var/log/nginx/{{SERVER_NAME}}-access.log;
+    error_log /var/log/nginx/{{SERVER_NAME}}-error.log;
+}
+EOF
+
+    "$editor" "$template_file"
+
+    if [[ -f "$template_file" ]]; then
+        success "Template saved: $name"
+    fi
+}
+
+edit_custom_template() {
+    init_nginx_templates
+
+    local templates
+    templates=$(find "$NGINX_TEMPLATE_DIR" -maxdepth 1 -name "*.conf" -type f 2>/dev/null)
+
+    if [[ -z "$templates" ]]; then
+        error "No custom templates found"
+        return 1
+    fi
+
+    local options=()
+    while IFS= read -r template; do
+        options+=("$(basename "$template" .conf)")
+    done <<< "$templates"
+
+    local choice
+    choice=$(printf '%s\n' "${options[@]}" | gum filter \
+        --header "Select template to edit:" \
+        --height 10)
+
+    [[ -z "$choice" ]] && return
+
+    local editor="${EDITOR:-nano}"
+    "$editor" "$NGINX_TEMPLATE_DIR/${choice}.conf"
+}
+
+delete_custom_template() {
+    init_nginx_templates
+
+    local templates
+    templates=$(find "$NGINX_TEMPLATE_DIR" -maxdepth 1 -name "*.conf" -type f 2>/dev/null)
+
+    if [[ -z "$templates" ]]; then
+        error "No custom templates found"
+        return 1
+    fi
+
+    local options=()
+    while IFS= read -r template; do
+        options+=("$(basename "$template" .conf)")
+    done <<< "$templates"
+
+    local choice
+    choice=$(printf '%s\n' "${options[@]}" | gum filter \
+        --header "Select template to delete:" \
+        --height 10)
+
+    [[ -z "$choice" ]] && return
+
+    if gum_confirm "Delete template '$choice'?"; then
+        rm -f "$NGINX_TEMPLATE_DIR/${choice}.conf"
+        success "Template deleted"
+    fi
+}
+
+use_custom_template() {
+    local template_name="$1"
+    local server_name="$2"
+    local port="$3"
+    local root_path="$4"
+    local backend="$5"
+
+    local template_file="$NGINX_TEMPLATE_DIR/${template_name}.conf"
+
+    if [[ ! -f "$template_file" ]]; then
+        error "Template not found: $template_name"
+        return 1
+    fi
+
+    cat "$template_file" | \
+        sed "s|{{SERVER_NAME}}|$server_name|g" | \
+        sed "s|{{PORT}}|$port|g" | \
+        sed "s|{{ROOT_PATH}}|$root_path|g" | \
+        sed "s|{{BACKEND}}|$backend|g"
+}
+
+
+generate_nginx_config() {
+    local project_root="${1:-$PWD}"
+    project_root=$(cd "$project_root" && pwd)
+
+    local project_name
+    project_name=$(basename "$project_root")
+
+    echo "${BOLD}Nginx Configuration Generator${RESET}"
+    echo ""
+
+    # Server name
+    local server_name
+    server_name=$(gum_input "Server name (domain):" "${project_name}.local")
+
+    [[ -z "$server_name" ]] && return
+
+    # Listen port
+    local port
+    if [[ "$UI_MODE" == "gum" ]]; then
+        port=$(gum choose --header "Listen port:" "80" "8080" "443" "Custom...")
+        if [[ "$port" == "Custom..." ]]; then
+            port=$(gum_input "Enter port:" "80")
+        fi
+    else
+        read -rp "Listen port [80]: " port
+        port="${port:-80}"
+    fi
+
+    # Listen IP
+    local listen_ip
+    if [[ "$UI_MODE" == "gum" ]]; then
+        listen_ip=$(gum choose --header "Listen IP:" "*" "127.0.0.1" "0.0.0.0")
+    else
+        read -rp "Listen IP [*]: " listen_ip
+        listen_ip="${listen_ip:-*}"
+    fi
+
+    # Backend type selection
+    local backend_choice
+    if [[ "$UI_MODE" == "gum" ]]; then
+        local backend_options=("PHP-FPM" "Supervisor Service" "Custom Proxy")
+
+        # Check for available options
+        local supervisor_services
+        supervisor_services=$(get_project_supervisor_services 2>/dev/null)
+        [[ -z "$supervisor_services" ]] && backend_options=("PHP-FPM" "Custom Proxy")
+
+        backend_choice=$(printf '%s\n' "${backend_options[@]}" | gum filter \
+            --header "Select backend type:" \
+            --height 8)
+    else
+        echo "Backend type:"
+        echo "  1) PHP-FPM"
+        echo "  2) Supervisor Service"
+        echo "  3) Custom Proxy"
+        read -rp "Select [1]: " bc
+        case "$bc" in
+            2) backend_choice="Supervisor Service" ;;
+            3) backend_choice="Custom Proxy" ;;
+            *) backend_choice="PHP-FPM" ;;
+        esac
+    fi
+
+    local backend=""
+    local backend_type=""
+
+    case "$backend_choice" in
+        "PHP-FPM")
+            backend=$(select_fpm_pool)
+            backend_type="$BACKEND_FPM"
+            ;;
+        "Supervisor Service")
+            local service_port
+            service_port=$(select_supervisor_service)
+            if [[ -n "$service_port" ]]; then
+                backend="127.0.0.1:$service_port"
+                backend_type="$BACKEND_CUSTOM"
+            else
+                backend=$(gum_input "Enter proxy address:" "127.0.0.1:8000")
+                backend_type="$BACKEND_CUSTOM"
+            fi
+            ;;
+        "Custom Proxy")
+            backend=$(gum_input "Enter proxy address:" "127.0.0.1:8000")
+            backend_type="$BACKEND_CUSTOM"
+            ;;
+    esac
+
+    [[ -z "$backend" ]] && return
+
+    # Template selection
+    local template_choice
+    local framework
+    framework=$(detect_framework 2>/dev/null)
+
+    # Build template options
+    local template_options=()
+    case "$framework" in
+        laravel) template_options+=("Laravel (recommended)") ;;
+        symfony) template_options+=("Symfony (recommended)") ;;
+        yii) template_options+=("Yii (recommended)") ;;
+    esac
+    template_options+=("Generic PHP")
+
+    # Add custom templates
+    local custom_templates
+    custom_templates=$(find "$NGINX_TEMPLATE_DIR" -maxdepth 1 -name "*.conf" -type f 2>/dev/null | while read -r t; do basename "$t" .conf; done)
+    if [[ -n "$custom_templates" ]]; then
+        while IFS= read -r ct; do
+            template_options+=("Custom: $ct")
+        done <<< "$custom_templates"
+    fi
+
+    if [[ "$UI_MODE" == "gum" ]]; then
+        template_choice=$(printf '%s\n' "${template_options[@]}" | gum filter \
+            --header "Select template:" \
+            --height 10)
+    else
+        echo "Template:"
+        local i=1
+        for opt in "${template_options[@]}"; do
+            echo "  $i) $opt"
+            ((i++))
+        done
+        read -rp "Select [1]: " tc
+        template_choice="${template_options[$((tc-1))]}"
+    fi
+
+    # Generate config
+    local config=""
+    case "$template_choice" in
+        "Laravel"*) config=$(generate_laravel_template "$server_name" "$port" "$project_root" "$backend" "$backend_type") ;;
+        "Symfony"*) config=$(generate_symfony_template "$server_name" "$port" "$project_root" "$backend" "$backend_type") ;;
+        "Yii"*) config=$(generate_yii_template "$server_name" "$port" "$project_root" "$backend" "$backend_type") ;;
+        "Custom: "*)
+            local custom_name="${template_choice#Custom: }"
+            config=$(use_custom_template "$custom_name" "$server_name" "$port" "$project_root" "$backend")
+            ;;
+        *) config=$(generate_generic_template "$server_name" "$port" "$project_root" "$backend" "$backend_type") ;;
+    esac
+
+    # Adjust listen directive for IP
+    if [[ "$listen_ip" != "*" ]]; then
+        config=$(echo "$config" | sed "s/listen $port;/listen ${listen_ip}:${port};/g")
+        config=$(echo "$config" | sed "s/listen \[::\]:$port;/listen [::1]:${port};/g")
+    fi
+
+    # Preview config
+    echo ""
+    echo "${BOLD}Generated Configuration:${RESET}"
+    echo "----------------------------------------"
+    echo "$config"
+    echo "----------------------------------------"
+    echo ""
+
+    # Save location
+    local save_location
+    if [[ "$UI_MODE" == "gum" ]]; then
+        save_location=$(gum choose \
+            --header "Save to:" \
+            "/etc/nginx/sites-available/${server_name}.conf" \
+            "/etc/nginx/conf.d/${server_name}.conf" \
+            "Print to stdout only" \
+            "Cancel")
+    else
+        echo "Save to:"
+        echo "  1) /etc/nginx/sites-available/${server_name}.conf"
+        echo "  2) /etc/nginx/conf.d/${server_name}.conf"
+        echo "  3) Print to stdout only"
+        echo "  4) Cancel"
+        read -rp "Select [1]: " sl
+        case "$sl" in
+            2) save_location="/etc/nginx/conf.d/${server_name}.conf" ;;
+            3) save_location="Print to stdout only" ;;
+            4) save_location="Cancel" ;;
+            *) save_location="/etc/nginx/sites-available/${server_name}.conf" ;;
+        esac
+    fi
+
+    case "$save_location" in
+        "Cancel"|"")
+            return
+            ;;
+        "Print to stdout only")
+            echo "$config"
+            return
+            ;;
+        *)
+            echo "$config" | run_privileged tee "$save_location" > /dev/null
+
+            if [[ $? -eq 0 ]]; then
+                success "Configuration saved: $save_location"
+
+                # Enable site if in sites-available
+                if [[ "$save_location" == "/etc/nginx/sites-available/"* ]]; then
+                    local site_name
+                    site_name=$(basename "$save_location")
+                    local enabled_link="/etc/nginx/sites-enabled/$site_name"
+
+                    if [[ ! -e "$enabled_link" ]]; then
+                        if gum_confirm "Enable site?"; then
+                            run_privileged ln -sf "$save_location" "$enabled_link"
+                            success "Site enabled"
+                        fi
+                    fi
+                fi
+
+                # Test and reload nginx
+                if gum_confirm "Test and reload nginx?"; then
+                    if run_privileged nginx -t; then
+                        nginx_reload
+                    else
+                        error "Configuration test failed. Please fix errors before reloading."
+                    fi
+                fi
+
+                # Add to /etc/hosts
+                if gum_confirm "Add '$server_name' to /etc/hosts?"; then
+                    if ! grep -q "$server_name" /etc/hosts 2>/dev/null; then
+                        echo "127.0.0.1 $server_name" | run_privileged tee -a /etc/hosts > /dev/null
+                        success "Added to /etc/hosts"
+                    else
+                        warn "$server_name already in /etc/hosts"
+                    fi
+                fi
+            else
+                error "Failed to save configuration"
+            fi
+            ;;
+    esac
+}
+
+
+show_nginx_info() {
+    local project_root="${1:-$PWD}"
+
+    local all_configs
+    all_configs=$(find_all_nginx_configs "$project_root")
+
+    if [[ -z "$all_configs" ]]; then
+        warn "No nginx configuration found for this project"
+        echo ""
+        echo "Searched directories:"
+        for dir in "${NGINX_CONF_DIRS[@]}"; do
+            echo "  - $dir"
+        done
+        echo ""
+        echo "Run 'php nginx generate' to create a configuration"
+        return 1
+    fi
+
+    local config_count
+    config_count=$(echo "$all_configs" | wc -l)
+
+    echo ""
+    echo "${BOLD}Nginx Configuration${RESET}"
+
+    if [[ "$config_count" -gt 1 ]]; then
+        echo "  ${YELLOW}Multiple configs found ($config_count)${RESET}"
+    fi
+
+    while IFS= read -r config_file; do
+        local server_name port backend_type
+        server_name=$(parse_server_name "$config_file")
+        port=$(parse_listen_port "$config_file")
+        backend_type=$(detect_backend_type "$config_file")
+
+        echo ""
+        echo "  ${CYAN}Config:${RESET} $config_file"
+        echo "  Server name: ${server_name:-N/A}"
+        echo "  Listen port: $port"
+        echo "  Backend:     $(get_backend_display_name "$backend_type")"
+
+        case "$backend_type" in
+            "$BACKEND_FPM")
+                local fpm_backend
+                fpm_backend=$(parse_fpm_backend "$config_file")
+                echo "  FPM Socket:  ${fpm_backend:-N/A}"
+                ;;
+            *)
+                local proxy_backend
+                proxy_backend=$(parse_proxy_backend "$config_file")
+                [[ -n "$proxy_backend" ]] && echo "  Proxy:       $proxy_backend"
+                ;;
+        esac
+    done <<< "$all_configs"
+
+    echo ""
+    echo "${BOLD}Nginx Status${RESET}"
+    local status
+    status=$(nginx_status)
+    if [[ "$status" == "active" ]]; then
+        echo "  Service: ${GREEN}running${RESET}"
+    else
+        echo "  Service: ${RED}stopped${RESET}"
+    fi
+
+    # Show running backends
+    echo ""
+    show_backend_processes
+
+    echo ""
+    echo "${BOLD}Log Files${RESET}"
+    local first_config
+    first_config=$(echo "$all_configs" | head -1)
+    echo "  Access: $(parse_access_log "$first_config")"
+    echo "  Error:  $(parse_error_log "$first_config")"
+}
+
+view_nginx_config() {
+    local config_file
+    config_file=$(select_nginx_config)
+
+    [[ -z "$config_file" ]] && return
+
+    if [[ "$UI_MODE" == "gum" ]]; then
+        cat "$config_file" | gum pager
+    else
+        less "$config_file"
+    fi
+}
+
+
+cmd_nginx() {
+    local subcommand="${1:-}"
+    shift 2>/dev/null || true
+
+    # If no subcommand and gum available, show interactive menu
+    if [[ -z "$subcommand" && "$UI_MODE" == "gum" ]]; then
+        interactive_nginx_menu
+        return
+    fi
+
+    case "$subcommand" in
+        ""|info|status)
+            show_nginx_info
+            ;;
+        reload)
+            nginx_reload
+            ;;
+        restart)
+            nginx_restart
+            ;;
+        config|view)
+            view_nginx_config
+            ;;
+        edit)
+            local config_file
+            config_file=$(select_nginx_config)
+            [[ -n "$config_file" ]] && run_privileged "${EDITOR:-nano}" "$config_file"
+            ;;
+        test)
+            info_log "Testing nginx configuration..."
+            run_privileged nginx -t
+            ;;
+        generate|create|new)
+            generate_nginx_config
+            ;;
+        processes|ps)
+            show_backend_processes
+            ;;
+        templates)
+            local template_cmd="${1:-list}"
+            case "$template_cmd" in
+                list) list_custom_templates ;;
+                add|new|create) add_custom_template ;;
+                edit) edit_custom_template ;;
+                delete|remove) delete_custom_template ;;
+                *)
+                    echo "Usage: php nginx templates [command]"
+                    echo "Commands: list, add, edit, delete"
+                    ;;
+            esac
+            ;;
+        *)
+            echo "Usage: php nginx [command]"
+            echo ""
+            echo "Commands:"
+            echo "  info        Show nginx configuration info (default)"
+            echo "  status      Same as info"
+            echo "  reload      Reload nginx configuration"
+            echo "  restart     Restart nginx service"
+            echo "  config      View nginx configuration (with selection)"
+            echo "  edit        Edit nginx configuration"
+            echo "  test        Test nginx configuration"
+            echo "  generate    Generate new nginx configuration"
+            echo "  processes   Show running backend processes"
+            echo "  templates   Manage custom templates"
+            echo ""
+            echo "Template commands:"
+            echo "  php nginx templates list    List custom templates"
+            echo "  php nginx templates add     Add custom template"
+            echo "  php nginx templates edit    Edit custom template"
+            echo "  php nginx templates delete  Delete custom template"
+            ;;
+    esac
+}
+
+interactive_nginx_menu() {
+    while true; do
+        clear
+        echo "${BOLD}Nginx Management${RESET}"
+        echo ""
+
+        local choice
+        choice=$(gum choose \
+            "Show Configuration Info" \
+            "View Configuration" \
+            "Edit Configuration" \
+            "Generate New Config" \
+            "Reload Nginx" \
+            "Restart Nginx" \
+            "Test Configuration" \
+            "Show Backend Processes" \
+            "Manage Templates" \
+            "Back")
+
+        case "$choice" in
+            "Show Configuration Info")
+                show_nginx_info
+                read -rp "Press Enter to continue..."
+                ;;
+            "View Configuration")
+                view_nginx_config
+                ;;
+            "Edit Configuration")
+                local config_file
+                config_file=$(select_nginx_config)
+                [[ -n "$config_file" ]] && run_privileged "${EDITOR:-nano}" "$config_file"
+                ;;
+            "Generate New Config")
+                generate_nginx_config
+                read -rp "Press Enter to continue..."
+                ;;
+            "Reload Nginx")
+                nginx_reload
+                read -rp "Press Enter to continue..."
+                ;;
+            "Restart Nginx")
+                nginx_restart
+                read -rp "Press Enter to continue..."
+                ;;
+            "Test Configuration")
+                run_privileged nginx -t
+                read -rp "Press Enter to continue..."
+                ;;
+            "Show Backend Processes")
+                show_backend_processes
+                read -rp "Press Enter to continue..."
+                ;;
+            "Manage Templates")
+                manage_templates_menu
+                ;;
+            "Back"|"")
+                break
+                ;;
+        esac
+    done
+}
+
+manage_templates_menu() {
+    while true; do
+        clear
+        echo "${BOLD}Nginx Template Management${RESET}"
+        echo ""
+
+        local choice
+        choice=$(gum choose \
+            "List Templates" \
+            "Add Template" \
+            "Edit Template" \
+            "Delete Template" \
+            "Back")
+
+        case "$choice" in
+            "List Templates")
+                list_custom_templates
+                read -rp "Press Enter to continue..."
+                ;;
+            "Add Template")
+                add_custom_template
+                ;;
+            "Edit Template")
+                edit_custom_template
+                ;;
+            "Delete Template")
+                delete_custom_template
+                ;;
+            "Back"|"")
+                break
+                ;;
+        esac
+    done
+}
+
+# === logs.sh ===
+
+DEFAULT_TAIL_LINES=50
+LOG_VIEWER_LEFT_WIDTH=30
+
+has_ripgrep() {
+    command -v rg &>/dev/null
+}
+
+has_grep() {
+    command -v grep &>/dev/null
+}
+
+ensure_search_tool() {
+    if has_ripgrep; then
+        return 0
+    fi
+
+    if has_grep; then
+        warn "ripgrep not found, using grep (slower)"
+        return 0
+    fi
+
+    # Offer to install ripgrep
+    echo "No search tool found (ripgrep or grep)"
+    if gum_confirm "Install ripgrep?"; then
+        info_log "Installing ripgrep..."
+        case "$DISTRO_FAMILY" in
+            debian)
+                run_privileged apt-get update
+                run_privileged apt-get install -y ripgrep
+                ;;
+            rhel)
+                run_privileged dnf install -y ripgrep 2>/dev/null || \
+                run_privileged yum install -y ripgrep
+                ;;
+            *)
+                error "Cannot auto-install ripgrep on this platform"
+                echo "Please install manually: https://github.com/BurntSushi/ripgrep"
+                return 1
+                ;;
+        esac
+
+        if has_ripgrep; then
+            success "ripgrep installed"
+            return 0
+        else
+            error "Failed to install ripgrep"
+            return 1
+        fi
+    fi
+
+    return 1
+}
+
+get_framework_log_dir() {
+    local framework
+    framework=$(detect_framework 2>/dev/null)
+
+    case "$framework" in
+        laravel)
+            echo "storage/logs"
+            ;;
+        symfony)
+            echo "var/log"
+            ;;
+        yii)
+            echo "runtime/logs"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+get_framework_logs() {
+    local log_dir
+    log_dir=$(get_framework_log_dir)
+
+    if [[ -z "$log_dir" || ! -d "$log_dir" ]]; then
+        return 1
+    fi
+
+    find "$log_dir" -type f -name "*.log" 2>/dev/null | sort -r
+}
+
+get_latest_framework_log() {
+    local log_dir
+    log_dir=$(get_framework_log_dir)
+
+    if [[ -z "$log_dir" || ! -d "$log_dir" ]]; then
+        return 1
+    fi
+
+    local framework
+    framework=$(detect_framework 2>/dev/null)
+
+    case "$framework" in
+        laravel)
+            local today_log="$log_dir/laravel-$(date +%Y-%m-%d).log"
+            if [[ -f "$today_log" ]]; then
+                echo "$today_log"
+            elif [[ -f "$log_dir/laravel.log" ]]; then
+                echo "$log_dir/laravel.log"
+            else
+                find "$log_dir" -type f -name "*.log" -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-
+            fi
+            ;;
+        symfony)
+            local env="${APP_ENV:-dev}"
+            if [[ -f "$log_dir/$env.log" ]]; then
+                echo "$log_dir/$env.log"
+            else
+                find "$log_dir" -type f -name "*.log" -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-
+            fi
+            ;;
+        yii)
+            if [[ -f "$log_dir/app.log" ]]; then
+                echo "$log_dir/app.log"
+            else
+                find "$log_dir" -type f -name "*.log" -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-
+            fi
+            ;;
+    esac
+}
+
+get_supervisor_log() {
+    local project_root="${1:-$PWD}"
+    local project_id
+    project_id=$(get_project_id "$project_root" 2>/dev/null)
+
+    if [[ -z "$project_id" ]]; then
+        return 1
+    fi
+
+    local log_file="/var/log/supervisor/${project_id}-worker.log"
+    if [[ -f "$log_file" ]]; then
+        echo "$log_file"
+        return 0
+    fi
+
+    find /var/log/supervisor -name "${project_id}*.log" 2>/dev/null | head -1
+}
+
+get_all_supervisor_logs() {
+    local project_root="${1:-$PWD}"
+    local project_id
+    project_id=$(get_project_id "$project_root" 2>/dev/null)
+
+    if [[ -z "$project_id" ]]; then
+        return 1
+    fi
+
+    find /var/log/supervisor -name "${project_id}*.log" 2>/dev/null | sort
+}
+
+get_nginx_access_log() {
+    local config_file
+    config_file=$(find_nginx_config 2>/dev/null)
+
+    if [[ -n "$config_file" ]]; then
+        parse_access_log "$config_file"
+    else
+        echo "/var/log/nginx/access.log"
+    fi
+}
+
+get_nginx_error_log() {
+    local config_file
+    config_file=$(find_nginx_config 2>/dev/null)
+
+    if [[ -n "$config_file" ]]; then
+        parse_error_log "$config_file"
+    else
+        echo "/var/log/nginx/error.log"
+    fi
+}
+
+get_fpm_log() {
+    local version
+    version=$(get_current_version 2>/dev/null)
+
+    local possible_logs=(
+        "/var/log/php${version}-fpm.log"
+        "/var/log/php-fpm/www-error.log"
+        "/var/log/php-fpm.log"
+        "/var/log/php/php${version}-fpm.log"
+    )
+
+    for log in "${possible_logs[@]}"; do
+        if [[ -f "$log" ]]; then
+            echo "$log"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+build_log_tree() {
+    local logs=()
+
+    # Nginx logs
+    local access_log error_log
+    access_log=$(get_nginx_access_log 2>/dev/null)
+    error_log=$(get_nginx_error_log 2>/dev/null)
+
+    [[ -f "$access_log" ]] && logs+=("nginx|access|$access_log")
+    [[ -f "$error_log" ]] && logs+=("nginx|error|$error_log")
+
+    # Framework logs
+    local framework
+    framework=$(detect_framework 2>/dev/null)
+
+    if [[ -n "$framework" ]]; then
+        local framework_logs
+        framework_logs=$(get_framework_logs 2>/dev/null)
+
+        if [[ -n "$framework_logs" ]]; then
+            while IFS= read -r log; do
+                local name
+                name=$(basename "$log")
+                logs+=("$framework|$name|$log")
+            done <<< "$framework_logs"
+        fi
+    fi
+
+    # Supervisor logs
+    local supervisor_logs
+    supervisor_logs=$(get_all_supervisor_logs 2>/dev/null)
+
+    if [[ -n "$supervisor_logs" ]]; then
+        while IFS= read -r log; do
+            local name
+            name=$(basename "$log")
+            logs+=("supervisor|$name|$log")
+        done <<< "$supervisor_logs"
+    fi
+
+    # PHP-FPM log
+    local fpm_log
+    fpm_log=$(get_fpm_log 2>/dev/null)
+    [[ -n "$fpm_log" && -f "$fpm_log" ]] && logs+=("php-fpm|fpm.log|$fpm_log")
+
+    printf '%s\n' "${logs[@]}"
+}
+
+resolve_log_path() {
+    local log_type="$1"
+
+    case "$log_type" in
+        app|framework|laravel|symfony|yii)
+            get_latest_framework_log
+            ;;
+        access|nginx-access)
+            get_nginx_access_log
+            ;;
+        error|nginx-error)
+            get_nginx_error_log
+            ;;
+        worker|supervisor)
+            get_supervisor_log
+            ;;
+        fpm|php-fpm)
+            get_fpm_log
+            ;;
+        all)
+            echo "all"
+            ;;
+        *)
+            # Assume it's a file path
+            if [[ -f "$log_type" ]]; then
+                echo "$log_type"
+            else
+                return 1
+            fi
+            ;;
+    esac
+}
+
+search_logs_rg() {
+    local pattern="$1"
+    local log_path="$2"
+    local lines="${3:-50}"
+    local case_insensitive="${4:-true}"
+
+    if [[ ! -f "$log_path" ]]; then
+        error "Log file not found: $log_path"
+        return 1
+    fi
+
+    local search_cmd
+    local args=()
+
+    if has_ripgrep; then
+        search_cmd="rg"
+        args+=(--color=always)
+        [[ "$case_insensitive" == "true" ]] && args+=(-i)
+        args+=("$pattern" "$log_path")
+    else
+        search_cmd="grep"
+        args+=(--color=always)
+        [[ "$case_insensitive" == "true" ]] && args+=(-i)
+        args+=("$pattern" "$log_path")
+    fi
+
+    if [[ ! -r "$log_path" ]]; then
+        run_privileged "$search_cmd" "${args[@]}" | tail -n "$lines"
+    else
+        "$search_cmd" "${args[@]}" | tail -n "$lines"
+    fi
+}
+
+parse_laravel_exception() {
+    local log_path="$1"
+    local lines="${2:-100}"
+
+    if [[ ! -f "$log_path" ]]; then
+        return 1
+    fi
+
+    # Laravel log format: [YYYY-MM-DD HH:MM:SS] environment.LEVEL: message
+    # Exceptions span multiple lines until next timestamp
+
+    local content
+    if [[ ! -r "$log_path" ]]; then
+        content=$(run_privileged tail -n "$lines" "$log_path")
+    else
+        content=$(tail -n "$lines" "$log_path")
+    fi
+
+    # Group by timestamp entries
+    echo "$content" | awk '
+    /^\[20[0-9]{2}-[0-9]{2}-[0-9]{2}/ {
+        if (entry != "") print entry
+        entry = $0
+        next
+    }
+    { entry = entry "\n" $0 }
+    END { if (entry != "") print entry }
+    '
+}
+
+parse_symfony_exception() {
+    local log_path="$1"
+    local lines="${2:-100}"
+
+    if [[ ! -f "$log_path" ]]; then
+        return 1
+    fi
+
+    local content
+    if [[ ! -r "$log_path" ]]; then
+        content=$(run_privileged tail -n "$lines" "$log_path")
+    else
+        content=$(tail -n "$lines" "$log_path")
+    fi
+
+    # Symfony log format: [YYYY-MM-DD HH:MM:SS] channel.LEVEL: message
+    echo "$content" | awk '
+    /^\[20[0-9]{2}-[0-9]{2}-[0-9]{2}/ {
+        if (entry != "") print entry
+        entry = $0
+        next
+    }
+    { entry = entry "\n" $0 }
+    END { if (entry != "") print entry }
+    '
+}
+
+parse_yii_exception() {
+    local log_path="$1"
+    local lines="${2:-100}"
+
+    if [[ ! -f "$log_path" ]]; then
+        return 1
+    fi
+
+    local content
+    if [[ ! -r "$log_path" ]]; then
+        content=$(run_privileged tail -n "$lines" "$log_path")
+    else
+        content=$(tail -n "$lines" "$log_path")
+    fi
+
+    # Yii log format varies, but typically starts with timestamp
+    echo "$content" | awk '
+    /^20[0-9]{2}[-\/][0-9]{2}[-\/][0-9]{2}/ || /^\[20[0-9]{2}/ {
+        if (entry != "") print entry
+        entry = $0
+        next
+    }
+    { entry = entry "\n" $0 }
+    END { if (entry != "") print entry }
+    '
+}
+
+parse_framework_exceptions() {
+    local log_path="$1"
+    local lines="${2:-100}"
+
+    local framework
+    framework=$(detect_framework 2>/dev/null)
+
+    case "$framework" in
+        laravel) parse_laravel_exception "$log_path" "$lines" ;;
+        symfony) parse_symfony_exception "$log_path" "$lines" ;;
+        yii) parse_yii_exception "$log_path" "$lines" ;;
+        *)
+            # Generic parsing
+            if [[ ! -r "$log_path" ]]; then
+                run_privileged tail -n "$lines" "$log_path"
+            else
+                tail -n "$lines" "$log_path"
+            fi
+            ;;
+    esac
+}
+
+filter_logs_by_level() {
+    local log_path="$1"
+    local level="$2"  # ERROR, WARNING, INFO, DEBUG
+    local lines="${3:-100}"
+
+    local pattern
+    case "${level^^}" in
+        ERROR|ERR) pattern="(ERROR|CRITICAL|EMERGENCY|ALERT)" ;;
+        WARNING|WARN) pattern="(WARNING|WARN)" ;;
+        INFO) pattern="INFO" ;;
+        DEBUG) pattern="DEBUG" ;;
+        *) pattern="$level" ;;
+    esac
+
+    search_logs_rg "$pattern" "$log_path" "$lines" "false"
+}
+
+list_logs_tree() {
+    local logs
+    logs=$(build_log_tree)
+
+    if [[ -z "$logs" ]]; then
+        echo "No logs found"
+        return 1
+    fi
+
+    echo "${BOLD}Available Logs${RESET}"
+    echo ""
+
+    local current_category=""
+
+    while IFS='|' read -r category name path; do
+        if [[ "$category" != "$current_category" ]]; then
+            current_category="$category"
+            echo "${BOLD}${CYAN}$category${RESET}"
+        fi
+
+        local size
+        size=$(du -h "$path" 2>/dev/null | cut -f1)
+        echo "  ├─ ${name} ${DIM}($size)${RESET}"
+    done <<< "$logs"
+}
+
+interactive_log_viewer() {
+    if [[ "$UI_MODE" != "gum" ]]; then
+        error "Interactive viewer requires gum"
+        echo "Install gum: https://github.com/charmbracelet/gum"
+        return 1
+    fi
+
+    local logs
+    logs=$(build_log_tree)
+
+    if [[ -z "$logs" ]]; then
+        error "No logs found"
+        return 1
+    fi
+
+    # Build selection menu
+    local options=()
+    local paths=()
+
+    while IFS='|' read -r category name path; do
+        options+=("$category/$name")
+        paths+=("$path")
+    done <<< "$logs"
+
+    while true; do
+        clear
+        echo "${BOLD}Interactive Log Viewer${RESET}"
+        echo "${DIM}Select a log to view, or press Esc to exit${RESET}"
+        echo ""
+
+        local choice
+        choice=$(printf '%s\n' "${options[@]}" | gum filter \
+            --header "Select log:" \
+            --height 15 \
+            --placeholder "Type to filter...")
+
+        [[ -z "$choice" ]] && break
+
+        # Find the path for selected choice
+        local selected_path=""
+        for i in "${!options[@]}"; do
+            if [[ "${options[$i]}" == "$choice" ]]; then
+                selected_path="${paths[$i]}"
+                break
+            fi
+        done
+
+        if [[ -n "$selected_path" ]]; then
+            show_log_with_options "$selected_path"
+        fi
+    done
+}
+
+show_log_with_options() {
+    local log_path="$1"
+
+    while true; do
+        clear
+        echo "${BOLD}Log: ${CYAN}$log_path${RESET}"
+        echo ""
+
+        local action
+        action=$(gum choose \
+            "View last 50 lines" \
+            "View last 100 lines" \
+            "View last 500 lines" \
+            "Tail (follow)" \
+            "Search" \
+            "Filter by level" \
+            "Parse exceptions" \
+            "Clear log" \
+            "Back")
+
+        case "$action" in
+            "View last 50 lines")
+                show_log_content "$log_path" 50
+                ;;
+            "View last 100 lines")
+                show_log_content "$log_path" 100
+                ;;
+            "View last 500 lines")
+                show_log_content "$log_path" 500
+                ;;
+            "Tail (follow)")
+                follow_single_log "$log_path"
+                ;;
+            "Search")
+                interactive_search "$log_path"
+                ;;
+            "Filter by level")
+                interactive_filter_level "$log_path"
+                ;;
+            "Parse exceptions")
+                show_parsed_exceptions "$log_path"
+                ;;
+            "Clear log")
+                clear_single_log "$log_path"
+                ;;
+            "Back"|"")
+                break
+                ;;
+        esac
+    done
+}
+
+show_log_content() {
+    local log_path="$1"
+    local lines="${2:-50}"
+
+    local content
+    if [[ ! -r "$log_path" ]]; then
+        content=$(run_privileged tail -n "$lines" "$log_path")
+    else
+        content=$(tail -n "$lines" "$log_path")
+    fi
+
+    if [[ "$UI_MODE" == "gum" ]]; then
+        echo "$content" | gum pager
+    else
+        echo "$content" | less
+    fi
+}
+
+follow_single_log() {
+    local log_path="$1"
+
+    echo ""
+    info_log "Following: $log_path"
+    echo "${DIM}Press Ctrl+C to stop${RESET}"
+    echo ""
+
+    if [[ ! -r "$log_path" ]]; then
+        run_privileged tail -f "$log_path"
+    else
+        tail -f "$log_path"
+    fi
+}
+
+interactive_search() {
+    local log_path="$1"
+
+    ensure_search_tool || return 1
+
+    local pattern
+    pattern=$(gum input --placeholder "Enter search pattern...")
+
+    [[ -z "$pattern" ]] && return
+
+    echo ""
+    info_log "Searching for: $pattern"
+    echo ""
+
+    local results
+    results=$(search_logs_rg "$pattern" "$log_path" 100)
+
+    if [[ -n "$results" ]]; then
+        echo "$results" | gum pager
+    else
+        warn "No matches found"
+        read -rp "Press Enter to continue..."
+    fi
+}
+
+interactive_filter_level() {
+    local log_path="$1"
+
+    local level
+    level=$(gum choose "ERROR" "WARNING" "INFO" "DEBUG" "Custom")
+
+    [[ -z "$level" ]] && return
+
+    if [[ "$level" == "Custom" ]]; then
+        level=$(gum input --placeholder "Enter custom level/pattern...")
+        [[ -z "$level" ]] && return
+    fi
+
+    echo ""
+    info_log "Filtering by level: $level"
+    echo ""
+
+    local results
+    results=$(filter_logs_by_level "$log_path" "$level" 100)
+
+    if [[ -n "$results" ]]; then
+        echo "$results" | gum pager
+    else
+        warn "No matches found"
+        read -rp "Press Enter to continue..."
+    fi
+}
+
+show_parsed_exceptions() {
+    local log_path="$1"
+
+    echo ""
+    info_log "Parsing exceptions..."
+    echo ""
+
+    local results
+    results=$(parse_framework_exceptions "$log_path" 200)
+
+    if [[ -n "$results" ]]; then
+        echo "$results" | gum pager
+    else
+        warn "No exceptions found"
+        read -rp "Press Enter to continue..."
+    fi
+}
+
+clear_single_log() {
+    local log_path="$1"
+
+    if ! gum_confirm "Clear log file: $log_path?"; then
+        return 0
+    fi
+
+    if [[ ! -w "$log_path" ]]; then
+        run_privileged truncate -s 0 "$log_path"
+    else
+        truncate -s 0 "$log_path"
+    fi
+
+    if [[ $? -eq 0 ]]; then
+        success "Log cleared"
+    else
+        error "Failed to clear log"
+    fi
+
+    read -rp "Press Enter to continue..."
+}
+
+split_screen_viewer() {
+    if ! command -v tmux &>/dev/null; then
+        error "Split screen requires tmux"
+        echo "Install tmux: sudo apt install tmux"
+        return 1
+    fi
+
+    local logs
+    logs=$(build_log_tree)
+
+    if [[ -z "$logs" ]]; then
+        error "No logs found"
+        return 1
+    fi
+
+    # Build selection menu
+    local options=()
+    local paths=()
+
+    while IFS='|' read -r category name path; do
+        options+=("$category/$name")
+        paths+=("$path")
+    done <<< "$logs"
+
+    echo "${BOLD}Split Screen Log Viewer${RESET}"
+    echo ""
+
+    # Select first log
+    echo "Select log for ${CYAN}LEFT${RESET} pane:"
+    local left_choice
+    left_choice=$(printf '%s\n' "${options[@]}" | gum filter \
+        --header "Select left log:" \
+        --height 10)
+
+    [[ -z "$left_choice" ]] && return
+
+    local left_path=""
+    for i in "${!options[@]}"; do
+        if [[ "${options[$i]}" == "$left_choice" ]]; then
+            left_path="${paths[$i]}"
+            break
+        fi
+    done
+
+    # Select second log
+    echo ""
+    echo "Select log for ${CYAN}RIGHT${RESET} pane:"
+    local right_choice
+    right_choice=$(printf '%s\n' "${options[@]}" | gum filter \
+        --header "Select right log:" \
+        --height 10)
+
+    [[ -z "$right_choice" ]] && return
+
+    local right_path=""
+    for i in "${!options[@]}"; do
+        if [[ "${options[$i]}" == "$right_choice" ]]; then
+            right_path="${paths[$i]}"
+            break
+        fi
+    done
+
+    # Start tmux split session
+    local session_name="phpvm_logs_$$"
+
+    echo ""
+    info_log "Starting split screen viewer..."
+    echo "${DIM}Press Ctrl+B then D to detach, or Ctrl+C in both panes to exit${RESET}"
+    sleep 1
+
+    # Create tmux session with split panes
+    tmux new-session -d -s "$session_name" "tail -f '$left_path'"
+    tmux split-window -h -t "$session_name" "tail -f '$right_path'"
+    tmux select-layout -t "$session_name" even-horizontal
+    tmux attach-session -t "$session_name"
+
+    # Cleanup
+    tmux kill-session -t "$session_name" 2>/dev/null
+}
+
+follow_all_logs() {
+    local logs_to_follow=()
+
+    # Collect all available logs
+    local app_log
+    app_log=$(get_latest_framework_log 2>/dev/null)
+    [[ -n "$app_log" && -f "$app_log" ]] && logs_to_follow+=("$app_log")
+
+    local error_log
+    error_log=$(get_nginx_error_log 2>/dev/null)
+    [[ -n "$error_log" && -f "$error_log" ]] && logs_to_follow+=("$error_log")
+
+    local supervisor_log
+    supervisor_log=$(get_supervisor_log 2>/dev/null)
+    [[ -n "$supervisor_log" && -f "$supervisor_log" ]] && logs_to_follow+=("$supervisor_log")
+
+    if [[ ${#logs_to_follow[@]} -eq 0 ]]; then
+        error "No log files found to follow"
+        return 1
+    fi
+
+    info_log "Following ${#logs_to_follow[@]} log files:"
+    for log in "${logs_to_follow[@]}"; do
+        echo "  - $log"
+    done
+    echo "${DIM}Press Ctrl+C to stop${RESET}"
+    echo ""
+
+    if [[ -r "${logs_to_follow[0]}" ]]; then
+        tail -f "${logs_to_follow[@]}"
+    else
+        run_privileged tail -f "${logs_to_follow[@]}"
+    fi
+}
+
+list_logs() {
+    list_logs_tree
+}
+
+show_log() {
+    local log_type="${1:-app}"
+    local lines="${2:-$DEFAULT_TAIL_LINES}"
+
+    local log_path
+    log_path=$(resolve_log_path "$log_type")
+
+    if [[ -z "$log_path" ]]; then
+        error "Log type '$log_type' not found"
+        echo ""
+        echo "Available log types:"
+        echo "  app      - Framework log (Laravel/Symfony/Yii)"
+        echo "  access   - Nginx access log"
+        echo "  error    - Nginx error log"
+        echo "  worker   - Supervisor worker log"
+        echo "  fpm      - PHP-FPM log"
+        return 1
+    fi
+
+    if [[ ! -f "$log_path" ]]; then
+        error "Log file not found: $log_path"
+        return 1
+    fi
+
+    if [[ ! -r "$log_path" ]]; then
+        run_privileged tail -n "$lines" "$log_path"
+    else
+        tail -n "$lines" "$log_path"
+    fi
+}
+
+follow_log() {
+    local log_type="${1:-app}"
+
+    if [[ "$log_type" == "all" ]]; then
+        follow_all_logs
+        return
+    fi
+
+    local log_path
+    log_path=$(resolve_log_path "$log_type")
+
+    if [[ -z "$log_path" ]]; then
+        error "Log type '$log_type' not found"
+        return 1
+    fi
+
+    if [[ ! -f "$log_path" ]]; then
+        error "Log file not found: $log_path"
+        return 1
+    fi
+
+    info_log "Following: $log_path"
+    echo "${DIM}Press Ctrl+C to stop${RESET}"
+    echo ""
+
+    if [[ ! -r "$log_path" ]]; then
+        run_privileged tail -f "$log_path"
+    else
+        tail -f "$log_path"
+    fi
+}
+
+search_logs() {
+    local pattern="$1"
+    local log_type="${2:-app}"
+    local lines="${3:-50}"
+
+    if [[ -z "$pattern" ]]; then
+        error "Search pattern required"
+        echo "Usage: php logs search <pattern> [log_type] [lines]"
+        return 1
+    fi
+
+    ensure_search_tool || return 1
+
+    local log_path
+    log_path=$(resolve_log_path "$log_type")
+
+    if [[ -z "$log_path" || ! -f "$log_path" ]]; then
+        error "Log file not found"
+        return 1
+    fi
+
+    info_log "Searching in: $log_path"
+    echo ""
+
+    search_logs_rg "$pattern" "$log_path" "$lines"
+}
+
+clear_log() {
+    local log_type="$1"
+
+    if [[ -z "$log_type" ]]; then
+        error "Log type required"
+        echo "Usage: php logs clear <log_type>"
+        return 1
+    fi
+
+    local log_path
+    log_path=$(resolve_log_path "$log_type")
+
+    if [[ -z "$log_path" || ! -f "$log_path" ]]; then
+        error "Log file not found"
+        return 1
+    fi
+
+    if ! gum_confirm "Clear log file: $log_path?"; then
+        return 0
+    fi
+
+    if [[ ! -w "$log_path" ]]; then
+        run_privileged truncate -s 0 "$log_path"
+    else
+        truncate -s 0 "$log_path"
+    fi
+
+    if [[ $? -eq 0 ]]; then
+        success "Log cleared: $log_path"
+    else
+        error "Failed to clear log"
+        return 1
+    fi
+}
+
+filter_logs() {
+    local level="$1"
+    local log_type="${2:-app}"
+    local lines="${3:-100}"
+
+    if [[ -z "$level" ]]; then
+        error "Log level required"
+        echo "Usage: php logs filter <level> [log_type] [lines]"
+        echo "Levels: ERROR, WARNING, INFO, DEBUG"
+        return 1
+    fi
+
+    local log_path
+    log_path=$(resolve_log_path "$log_type")
+
+    if [[ -z "$log_path" || ! -f "$log_path" ]]; then
+        error "Log file not found"
+        return 1
+    fi
+
+    info_log "Filtering $log_path by level: $level"
+    echo ""
+
+    filter_logs_by_level "$log_path" "$level" "$lines"
+}
+
+parse_exceptions() {
+    local log_type="${1:-app}"
+    local lines="${2:-200}"
+
+    local log_path
+    log_path=$(resolve_log_path "$log_type")
+
+    if [[ -z "$log_path" || ! -f "$log_path" ]]; then
+        error "Log file not found"
+        return 1
+    fi
+
+    info_log "Parsing exceptions from: $log_path"
+    echo ""
+
+    parse_framework_exceptions "$log_path" "$lines"
+}
+
+cmd_logs() {
+    local subcommand="${1:-}"
+    shift 2>/dev/null || true
+
+    # If no subcommand and gum available, show interactive viewer
+    if [[ -z "$subcommand" && "$UI_MODE" == "gum" ]]; then
+        interactive_log_viewer
+        return
+    fi
+
+    case "$subcommand" in
+        ""|list|ls)
+            list_logs
+            ;;
+        show|cat)
+            show_log "$@"
+            ;;
+        tail|follow|f)
+            follow_log "$@"
+            ;;
+        search|grep)
+            search_logs "$@"
+            ;;
+        filter)
+            filter_logs "$@"
+            ;;
+        parse|exceptions)
+            parse_exceptions "$@"
+            ;;
+        clear)
+            clear_log "$@"
+            ;;
+        split)
+            split_screen_viewer
+            ;;
+        interactive|viewer|ui)
+            interactive_log_viewer
+            ;;
+        *)
+            # If subcommand looks like a log type, show it
+            local resolved
+            resolved=$(resolve_log_path "$subcommand" 2>/dev/null)
+            if [[ -n "$resolved" ]]; then
+                show_log "$subcommand" "$@"
+            else
+                echo "Usage: php logs [command] [options]"
+                echo ""
+                echo "Commands:"
+                echo "  (none)            Interactive log viewer (with gum)"
+                echo "  list              List available logs"
+                echo "  show <type>       Show last N lines (default: 50)"
+                echo "  tail <type>       Follow log in real-time"
+                echo "  tail all          Follow all logs simultaneously"
+                echo "  search <pattern>  Search logs (ripgrep/grep)"
+                echo "  filter <level>    Filter by level (ERROR/WARNING/INFO/DEBUG)"
+                echo "  parse             Parse and show exceptions"
+                echo "  clear <type>      Clear/truncate log file"
+                echo "  split             Split screen view (requires tmux)"
+                echo "  interactive       Open interactive viewer"
+                echo ""
+                echo "Log types:"
+                echo "  app      - Framework log (Laravel/Symfony/Yii)"
+                echo "  access   - Nginx access log"
+                echo "  error    - Nginx error log"
+                echo "  worker   - Supervisor worker log"
+                echo "  fpm      - PHP-FPM log"
+                echo "  all      - All logs (for tail command)"
+                echo ""
+                echo "Examples:"
+                echo "  php logs                      # Interactive viewer"
+                echo "  php logs list                 # List all logs"
+                echo "  php logs show app             # Show last 50 lines"
+                echo "  php logs show app 100         # Show last 100 lines"
+                echo "  php logs tail app             # Follow app log"
+                echo "  php logs tail all             # Follow all logs"
+                echo "  php logs split                # Split screen (tmux)"
+                echo "  php logs search \"error\" app   # Search for 'error'"
+                echo "  php logs filter ERROR app     # Filter ERROR level"
+                echo "  php logs parse app            # Parse exceptions"
+                echo "  php logs clear app            # Clear app log"
+            fi
+            ;;
+    esac
+}
+
+cmd_tail() {
+    local log_type="${1:-app}"
+    follow_log "$log_type"
+}
+
+# === completion.sh ===
+
+generate_bash_completion() {
+    cat <<'COMPLETION'
+
+_phpvm_completions() {
+    local cur prev words cword
+    _get_comp_words_by_ref -n : cur prev words cword
+
+    # Base PHPVM commands
+    local base_commands="use install list info config fpm nginx logs tail menu serve worker cron self-update help"
+
+    # Framework detection (cached for performance)
+    local framework=""
+    if [[ -f "$PWD/artisan" ]]; then
+        framework="laravel"
+    elif [[ -f "$PWD/bin/console" ]] || [[ -f "$PWD/symfony.lock" ]]; then
+        framework="symfony"
+    elif [[ -f "$PWD/yii" ]]; then
+        framework="yii"
+    fi
+
+    case "$cword" in
+        1)
+            # First argument - main commands
+            local commands="$base_commands"
+
+            # Add framework commands if in project
+            case "$framework" in
+                laravel)
+                    commands="$commands artisan"
+                    [[ -f "$PWD/composer.json" ]] && grep -q '"laravel/horizon"' "$PWD/composer.json" 2>/dev/null && commands="$commands horizon"
+                    ;;
+                symfony)
+                    commands="$commands console"
+                    ;;
+                yii)
+                    commands="$commands yii"
+                    ;;
+            esac
+
+            COMPREPLY=($(compgen -W "$commands" -- "$cur"))
+            ;;
+        2)
+            case "${words[1]}" in
+                use|install)
+                    # PHP versions
+                    local versions="8.5 8.4 8.3 8.2 8.1 8.0 7.4 7.3 7.2 7.1 7.0 5.6"
+                    if [[ "${words[1]}" == "install" ]]; then
+                        versions="$versions extension"
+                    fi
+                    COMPREPLY=($(compgen -W "$versions" -- "$cur"))
+                    ;;
+                list)
+                    COMPREPLY=($(compgen -W "extensions" -- "$cur"))
+                    ;;
+                nginx)
+                    COMPREPLY=($(compgen -W "info status reload restart config edit test generate processes templates" -- "$cur"))
+                    ;;
+                logs)
+                    COMPREPLY=($(compgen -W "list show tail search filter parse clear split interactive app access error worker fpm" -- "$cur"))
+                    ;;
+                tail)
+                    COMPREPLY=($(compgen -W "app access error worker fpm all" -- "$cur"))
+                    ;;
+                artisan)
+                    # Laravel artisan commands
+                    if [[ "$framework" == "laravel" ]]; then
+                        local artisan_commands
+                        artisan_commands=$(php artisan list --format=txt 2>/dev/null | grep -E '^\s+\S+' | awk '{print $1}' | head -100)
+                        COMPREPLY=($(compgen -W "$artisan_commands" -- "$cur"))
+                    fi
+                    ;;
+                console)
+                    # Symfony console commands
+                    if [[ "$framework" == "symfony" ]]; then
+                        local console_commands
+                        console_commands=$(php bin/console list --format=txt 2>/dev/null | grep -E '^\s+\S+' | awk '{print $1}' | head -100)
+                        COMPREPLY=($(compgen -W "$console_commands" -- "$cur"))
+                    fi
+                    ;;
+                yii)
+                    # Yii commands
+                    if [[ "$framework" == "yii" ]]; then
+                        local yii_commands
+                        yii_commands=$(php yii help 2>/dev/null | grep -E '^\s+-' | awk '{print $2}' | head -100)
+                        COMPREPLY=($(compgen -W "$yii_commands" -- "$cur"))
+                    fi
+                    ;;
+            esac
+            ;;
+    esac
+
+    return 0
+}
+
+complete -F _phpvm_completions php
+COMPLETION
+}
+
+generate_zsh_completion() {
+    cat <<'COMPLETION'
+
+_phpvm() {
+    local curcontext="$curcontext" state line
+    typeset -A opt_args
+
+    # Framework detection
+    local framework=""
+    if [[ -f "$PWD/artisan" ]]; then
+        framework="laravel"
+    elif [[ -f "$PWD/bin/console" ]] || [[ -f "$PWD/symfony.lock" ]]; then
+        framework="symfony"
+    elif [[ -f "$PWD/yii" ]]; then
+        framework="yii"
+    fi
+
+    local base_commands=(
+        'use:Switch PHP version'
+        'install:Install PHP version or extension'
+        'list:List installed PHP versions'
+        'info:Show PHP information'
+        'config:Edit PHP configuration'
+        'fpm:Manage PHP-FPM'
+        'nginx:Manage nginx configuration'
+        'logs:View and manage logs'
+        'tail:Follow logs in real-time'
+        'menu:Interactive menu'
+        'serve:Start development server'
+        'worker:Manage queue workers'
+        'cron:Manage scheduled tasks'
+        'self-update:Update PHPVM'
+        'help:Show help'
+    )
+
+    # Add framework commands
+    case "$framework" in
+        laravel)
+            base_commands+=('artisan:Run artisan command')
+            [[ -f "$PWD/composer.json" ]] && grep -q '"laravel/horizon"' "$PWD/composer.json" 2>/dev/null && base_commands+=('horizon:Start Horizon')
+            ;;
+        symfony)
+            base_commands+=('console:Run console command')
+            ;;
+        yii)
+            base_commands+=('yii:Run yii command')
+            ;;
+    esac
+
+    _arguments -C \
+        '1: :->command' \
+        '*: :->args'
+
+    case $state in
+        command)
+            _describe -t commands 'php command' base_commands
+            ;;
+        args)
+            case $words[2] in
+                use|install)
+                    local versions=(8.5 8.4 8.3 8.2 8.1 8.0 7.4 7.3 7.2 7.1 7.0 5.6)
+                    [[ $words[2] == "install" ]] && versions+=(extension)
+                    _describe -t versions 'PHP version' versions
+                    ;;
+                list)
+                    _describe -t args 'list option' '(extensions)'
+                    ;;
+                nginx)
+                    local nginx_cmds=(info status reload restart config edit test generate processes templates)
+                    _describe -t commands 'nginx command' nginx_cmds
+                    ;;
+                logs)
+                    local logs_cmds=(list show tail search filter parse clear split interactive app access error worker fpm)
+                    _describe -t commands 'logs command' logs_cmds
+                    ;;
+                tail)
+                    local log_types=(app access error worker fpm all)
+                    _describe -t types 'log type' log_types
+                    ;;
+                artisan)
+                    if [[ "$framework" == "laravel" ]]; then
+                        local -a artisan_commands
+                        artisan_commands=(${(f)"$(php artisan list --format=txt 2>/dev/null | grep -E '^\s+\S+' | awk '{print $1}' | head -100)"})
+                        _describe -t commands 'artisan command' artisan_commands
+                    fi
+                    ;;
+                console)
+                    if [[ "$framework" == "symfony" ]]; then
+                        local -a console_commands
+                        console_commands=(${(f)"$(php bin/console list --format=txt 2>/dev/null | grep -E '^\s+\S+' | awk '{print $1}' | head -100)"})
+                        _describe -t commands 'console command' console_commands
+                    fi
+                    ;;
+                yii)
+                    if [[ "$framework" == "yii" ]]; then
+                        local -a yii_commands
+                        yii_commands=(${(f)"$(php yii help 2>/dev/null | grep -E '^\s+-' | awk '{print $2}' | head -100)"})
+                        _describe -t commands 'yii command' yii_commands
+                    fi
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+compdef _phpvm php
+COMPLETION
+}
+
+cmd_completion() {
+    local shell="$1"
+
+    case "$shell" in
+        bash)
+            generate_bash_completion
+            ;;
+        zsh)
+            generate_zsh_completion
+            ;;
+        *)
+            echo "Usage: php completion [bash|zsh]"
+            echo ""
+            echo "Enable completions:"
+            echo "  Bash: source <(php completion bash)"
+            echo "  Zsh:  source <(php completion zsh)"
+            echo ""
+            echo "To persist, add to your shell rc file:"
+            echo "  echo 'source <(php completion bash)' >> ~/.bashrc"
+            echo "  echo 'source <(php completion zsh)' >> ~/.zshrc"
+            ;;
+    esac
+}
+
 # === self_update.sh ===
 
 cmd_self_update() {
@@ -2125,6 +6775,9 @@ cmd_self_update() {
 # === help.sh ===
 
 show_help() {
+    local framework
+    framework=$(detect_framework 2>/dev/null)
+
     print_header
 
     cat <<EOF
@@ -2138,19 +6791,60 @@ ${BOLD}Version Management:${RESET}
 
 ${BOLD}Information:${RESET}
   info                Show PHPVM, PHP info, and version resolution
+  menu                Interactive dashboard menu
 
 ${BOLD}Configuration:${RESET}
   config              Edit PHP configuration files
   fpm                 Manage PHP-FPM services and pools
+  nginx               Manage nginx (info/reload/generate/processes)
+  nginx generate      Generate nginx config from template
+
+${BOLD}Logs:${RESET}
+  logs                Interactive log viewer (with gum)
+  logs list           List available logs
+  logs show <type>    Show log content
+  logs tail <type>    Follow log in real-time
+  logs split          Split-screen log viewer (tmux)
+  logs search <pat>   Search logs (ripgrep)
+  logs filter <lvl>   Filter by level (ERROR/WARNING/INFO)
+  logs parse          Parse framework exceptions
+  tail [type]         Shortcut for logs tail
+EOF
+
+    # Framework-specific commands
+    if [[ -n "$framework" ]]; then
+        cat <<EOF
+
+${BOLD}Project Commands ($(get_framework_display_name "$framework")):${RESET}
+  serve               Start development server
+  worker              Manage queue workers (Supervisor)
+  cron                Manage scheduled tasks (Crontab)
+EOF
+        case "$framework" in
+            laravel)
+                echo "  artisan [cmd]       Run artisan command"
+                has_horizon 2>/dev/null && echo "  horizon             Start Laravel Horizon"
+                has_octane 2>/dev/null && echo "  octane [cmd]        Run Laravel Octane"
+                ;;
+            symfony)
+                echo "  console [cmd]       Run console command"
+                ;;
+            yii)
+                echo "  yii [cmd]           Run yii command"
+                ;;
+        esac
+    fi
+
+    cat <<EOF
 
 ${BOLD}Maintenance:${RESET}
   self-update         Update PHPVM to latest version
+  completion [shell]  Generate shell completion (bash/zsh)
   help                Show this help message
 
 ${BOLD}Pass-through:${RESET}
   php [args]          Any other arguments pass to PHP binary
   php -v              Show PHP version (pass-through)
-  php --version       Show PHP version (pass-through)
   php script.php      Execute PHP script
 
 ${BOLD}Composer:${RESET}
@@ -2164,13 +6858,24 @@ ${BOLD}Version Resolution Order:${RESET}
   5. First installed version (fallback)
 
 ${BOLD}Examples:${RESET}
-  php use 8.4              # Switch to PHP 8.4 (select scope)
+  php use 8.4              # Switch to PHP 8.4
   php install 8.3          # Install PHP 8.3
-  php install              # Interactive install menu
-  php list                 # Show installed versions
-  php info                 # Show detailed info
+  php install extension    # Install extension (fuzzy search)
+  php menu                 # Open interactive dashboard
+  php serve                # Start dev server (in project)
+  php worker               # Manage queue workers (in project)
+  php nginx                # Interactive nginx menu / config info
+  php nginx generate       # Generate nginx config with wizard
+  php nginx processes      # Show running backends (Octane, etc.)
+  php logs                 # Interactive log viewer
+  php logs split           # Split-screen dual log viewer
+  php tail app             # Follow application log
+  php logs search "error"  # Search logs with ripgrep
   echo "8.4" > .phpversion # Set project PHP version
-  composer require foo     # Run composer with current PHP
+
+${BOLD}Tab Completion:${RESET}
+  source <(php completion bash)  # Enable bash completion
+  source <(php completion zsh)   # Enable zsh completion
 
 ${BOLD}More Info:${RESET}
   GitHub: https://github.com/${PHPVM_REPO}
@@ -2178,18 +6883,54 @@ EOF
 }
 
 # === Main ===
-main() {
-    setup_colors
-    detect_distro
-    set_ui_mode
+# Quick check if command is PHPVM command (for performance)
+is_phpvm_command() {
+    case "$1" in
+        use|install|list|info|config|fpm|menu|serve|worker|cron|nginx|logs|tail|completion|self-update|selfupdate|update|help|--help|-h)
+            return 0
+            ;;
+        artisan|console|yii|horizon|octane)
+            # Framework commands - only if in project directory
+            is_framework_project && return 0
+            return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
 
-    # No arguments - show help
+main() {
+    # Fast path: if no args or not a PHPVM command, minimal initialization
     if [[ $# -eq 0 ]]; then
+        setup_colors
+        detect_distro
+        set_ui_mode
         show_help
         exit 0
     fi
 
     local command="$1"
+
+    # Fast pass-through for PHP execution (minimal overhead)
+    if ! is_phpvm_command "$command"; then
+        # Direct pass-through to PHP binary
+        local php_binary
+        php_binary=$(get_php_binary 2>/dev/null)
+        if [[ -z "$php_binary" || ! -x "$php_binary" ]]; then
+            setup_colors
+            error "No PHP version installed"
+            echo "Run 'php install' to install PHP"
+            exit 1
+        fi
+        exec "$php_binary" "$@"
+    fi
+
+    # Full initialization for PHPVM commands
+    setup_colors
+    detect_distro
+    set_ui_mode
+
     shift
 
     case "$command" in
@@ -2223,6 +6964,69 @@ main() {
             cmd_fpm
             ;;
 
+        # Interactive menu
+        menu)
+            init_phpvm
+            cmd_menu
+            ;;
+
+        # Framework commands (only available in project directories)
+        serve)
+            init_phpvm
+            cmd_serve
+            ;;
+        worker)
+            init_phpvm
+            cmd_worker
+            ;;
+        cron)
+            init_phpvm
+            cmd_cron
+            ;;
+
+        # Nginx management
+        nginx)
+            init_phpvm
+            cmd_nginx "$@"
+            ;;
+
+        # Log management
+        logs)
+            init_phpvm
+            cmd_logs "$@"
+            ;;
+        tail)
+            init_phpvm
+            cmd_tail "$@"
+            ;;
+
+        # Framework-specific pass-through
+        artisan)
+            init_phpvm
+            run_artisan "$@"
+            ;;
+        console)
+            init_phpvm
+            run_console "$@"
+            ;;
+        yii)
+            init_phpvm
+            run_yii "$@"
+            ;;
+        horizon)
+            init_phpvm
+            run_horizon_cmd
+            ;;
+        octane)
+            init_phpvm
+            run_octane_cmd "$@"
+            ;;
+
+        # Tab completion
+        completion)
+            cmd_completion "$@"
+            ;;
+
         # Maintenance
         self-update|selfupdate|update)
             cmd_self_update
@@ -2232,33 +7036,72 @@ main() {
         help|--help|-h)
             show_help
             ;;
-
-        # Pass-through to PHP
-        -v|--version)
-            # These go directly to PHP binary
-            local php_binary
-            php_binary=$(get_php_binary 2>/dev/null)
-            if [[ -n "$php_binary" && -x "$php_binary" ]]; then
-                exec "$php_binary" "$command" "$@"
-            else
-                error "No PHP version installed"
-                echo "Run 'php install' to install PHP"
-                exit 1
-            fi
-            ;;
-
-        *)
-            # Any other command passes through to PHP binary
-            local php_binary
-            php_binary=$(get_php_binary 2>/dev/null)
-            if [[ -z "$php_binary" || ! -x "$php_binary" ]]; then
-                error "No PHP version installed"
-                echo "Run 'php install' to install PHP"
-                exit 1
-            fi
-            exec "$php_binary" "$command" "$@"
-            ;;
     esac
+}
+
+# Framework command runners
+run_artisan() {
+    if [[ ! -f "artisan" ]]; then
+        error "Not in a Laravel project directory"
+        return 1
+    fi
+    local php_bin
+    php_bin=$(get_php_binary)
+    exec "$php_bin" artisan "$@"
+}
+
+run_console() {
+    if [[ ! -f "bin/console" ]]; then
+        error "Not in a Symfony project directory"
+        return 1
+    fi
+    local php_bin
+    php_bin=$(get_php_binary)
+    exec "$php_bin" bin/console "$@"
+}
+
+run_yii() {
+    if [[ ! -f "yii" ]]; then
+        error "Not in a Yii project directory"
+        return 1
+    fi
+    local php_bin
+    php_bin=$(get_php_binary)
+    exec "$php_bin" yii "$@"
+}
+
+run_horizon_cmd() {
+    if [[ ! -f "artisan" ]]; then
+        error "Not in a Laravel project directory"
+        return 1
+    fi
+    if ! has_horizon; then
+        error "Laravel Horizon is not installed"
+        echo "Install with: composer require laravel/horizon"
+        return 1
+    fi
+    local php_bin
+    php_bin=$(get_php_binary)
+    exec "$php_bin" artisan horizon
+}
+
+run_octane_cmd() {
+    if [[ ! -f "artisan" ]]; then
+        error "Not in a Laravel project directory"
+        return 1
+    fi
+    if ! has_octane; then
+        error "Laravel Octane is not installed"
+        echo "Install with: composer require laravel/octane"
+        return 1
+    fi
+    local php_bin
+    php_bin=$(get_php_binary)
+    if [[ $# -eq 0 ]]; then
+        exec "$php_bin" artisan octane:start
+    else
+        exec "$php_bin" artisan "octane:$1" "${@:2}"
+    fi
 }
 
 main "$@"

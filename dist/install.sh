@@ -6,7 +6,7 @@
 
 set -o pipefail
 
-PHPVM_VERSION="1.0.0"
+PHPVM_VERSION="1.1.0"
 PHPVM_REPO="professor93/phpvm"
 PHPVM_RAW_URL="https://raw.githubusercontent.com/${PHPVM_REPO}/main"
 
@@ -170,10 +170,10 @@ install_gum() {
 
     case "$filename" in
         *.deb)
-            sudo dpkg -i "${tmp_dir}/${filename}" 2>/dev/null
+            sudo dpkg -i "${tmp_dir}/${filename}" &>/dev/null
             ;;
         *.rpm)
-            sudo rpm -i "${tmp_dir}/${filename}" 2>/dev/null
+            sudo rpm -i "${tmp_dir}/${filename}" &>/dev/null
             ;;
         *.tar.gz)
             tar -xzf "${tmp_dir}/${filename}" -C "$tmp_dir"

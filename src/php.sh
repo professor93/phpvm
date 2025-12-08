@@ -4,8 +4,8 @@
 
 set -o pipefail
 
-# Version
-PHPVM_VERSION="1.0.0"
+# Version (overridden by config.sh)
+PHPVM_VERSION="1.1.0"
 
 # Source modules (will be inlined for distribution)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,27 +17,71 @@ source "$SCRIPT_DIR/modules/utils.sh"
 source "$SCRIPT_DIR/modules/platform.sh"
 source "$SCRIPT_DIR/modules/ui.sh"
 source "$SCRIPT_DIR/modules/version.sh"
+source "$SCRIPT_DIR/modules/framework.sh"
 source "$SCRIPT_DIR/modules/install.sh"
 source "$SCRIPT_DIR/modules/use.sh"
 source "$SCRIPT_DIR/modules/list.sh"
 source "$SCRIPT_DIR/modules/info.sh"
 source "$SCRIPT_DIR/modules/config_edit.sh"
 source "$SCRIPT_DIR/modules/fpm.sh"
+source "$SCRIPT_DIR/modules/worker.sh"
+source "$SCRIPT_DIR/modules/cron.sh"
+source "$SCRIPT_DIR/modules/serve.sh"
+source "$SCRIPT_DIR/modules/menu.sh"
+source "$SCRIPT_DIR/modules/nginx.sh"
+source "$SCRIPT_DIR/modules/logs.sh"
+source "$SCRIPT_DIR/modules/completion.sh"
 source "$SCRIPT_DIR/modules/self_update.sh"
 source "$SCRIPT_DIR/modules/help.sh"
 
-main() {
-    setup_colors
-    detect_distro
-    set_ui_mode
+# Quick check if command is PHPVM command (for performance)
+is_phpvm_command() {
+    case "$1" in
+        use|install|list|info|config|fpm|menu|serve|worker|cron|nginx|logs|tail|completion|self-update|selfupdate|update|help|--help|-h)
+            return 0
+            ;;
+        artisan|console|yii|horizon|octane)
+            # Framework commands - only if in project directory
+            is_framework_project && return 0
+            return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
 
-    # No arguments - show help
+main() {
+    # Fast path: if no args, show quick usage
     if [[ $# -eq 0 ]]; then
-        show_help
+        setup_colors
+        detect_distro
+        set_ui_mode
+        show_quick_usage
         exit 0
     fi
 
     local command="$1"
+
+    # Fast pass-through for PHP execution (minimal overhead)
+    if ! is_phpvm_command "$command"; then
+        # Direct pass-through to PHP binary
+        local php_binary
+        php_binary=$(get_php_binary 2>/dev/null)
+        if [[ -z "$php_binary" || ! -x "$php_binary" ]]; then
+            setup_colors
+            error "No PHP version installed"
+            echo "Run 'php install' to install PHP"
+            exit 1
+        fi
+        exec "$php_binary" "$@"
+    fi
+
+    # Full initialization for PHPVM commands
+    setup_colors
+    detect_distro
+    set_ui_mode
+
     shift
 
     case "$command" in
@@ -71,6 +115,69 @@ main() {
             cmd_fpm
             ;;
 
+        # Interactive menu
+        menu)
+            init_phpvm
+            cmd_menu
+            ;;
+
+        # Framework commands (only available in project directories)
+        serve)
+            init_phpvm
+            cmd_serve
+            ;;
+        worker)
+            init_phpvm
+            cmd_worker
+            ;;
+        cron)
+            init_phpvm
+            cmd_cron
+            ;;
+
+        # Nginx management
+        nginx)
+            init_phpvm
+            cmd_nginx "$@"
+            ;;
+
+        # Log management
+        logs)
+            init_phpvm
+            cmd_logs "$@"
+            ;;
+        tail)
+            init_phpvm
+            cmd_tail "$@"
+            ;;
+
+        # Framework-specific pass-through
+        artisan)
+            init_phpvm
+            run_artisan "$@"
+            ;;
+        console)
+            init_phpvm
+            run_console "$@"
+            ;;
+        yii)
+            init_phpvm
+            run_yii "$@"
+            ;;
+        horizon)
+            init_phpvm
+            run_horizon_cmd
+            ;;
+        octane)
+            init_phpvm
+            run_octane_cmd "$@"
+            ;;
+
+        # Tab completion
+        completion)
+            cmd_completion "$@"
+            ;;
+
         # Maintenance
         self-update|selfupdate|update)
             cmd_self_update
@@ -80,33 +187,72 @@ main() {
         help|--help|-h)
             show_help
             ;;
-
-        # Pass-through to PHP
-        -v|--version)
-            # These go directly to PHP binary
-            local php_binary
-            php_binary=$(get_php_binary 2>/dev/null)
-            if [[ -n "$php_binary" && -x "$php_binary" ]]; then
-                exec "$php_binary" "$command" "$@"
-            else
-                error "No PHP version installed"
-                echo "Run 'php install' to install PHP"
-                exit 1
-            fi
-            ;;
-
-        *)
-            # Any other command passes through to PHP binary
-            local php_binary
-            php_binary=$(get_php_binary 2>/dev/null)
-            if [[ -z "$php_binary" || ! -x "$php_binary" ]]; then
-                error "No PHP version installed"
-                echo "Run 'php install' to install PHP"
-                exit 1
-            fi
-            exec "$php_binary" "$command" "$@"
-            ;;
     esac
+}
+
+# Framework command runners
+run_artisan() {
+    if [[ ! -f "artisan" ]]; then
+        error "Not in a Laravel project directory"
+        return 1
+    fi
+    local php_bin
+    php_bin=$(get_php_binary)
+    exec "$php_bin" artisan "$@"
+}
+
+run_console() {
+    if [[ ! -f "bin/console" ]]; then
+        error "Not in a Symfony project directory"
+        return 1
+    fi
+    local php_bin
+    php_bin=$(get_php_binary)
+    exec "$php_bin" bin/console "$@"
+}
+
+run_yii() {
+    if [[ ! -f "yii" ]]; then
+        error "Not in a Yii project directory"
+        return 1
+    fi
+    local php_bin
+    php_bin=$(get_php_binary)
+    exec "$php_bin" yii "$@"
+}
+
+run_horizon_cmd() {
+    if [[ ! -f "artisan" ]]; then
+        error "Not in a Laravel project directory"
+        return 1
+    fi
+    if ! has_horizon; then
+        error "Laravel Horizon is not installed"
+        echo "Install with: composer require laravel/horizon"
+        return 1
+    fi
+    local php_bin
+    php_bin=$(get_php_binary)
+    exec "$php_bin" artisan horizon
+}
+
+run_octane_cmd() {
+    if [[ ! -f "artisan" ]]; then
+        error "Not in a Laravel project directory"
+        return 1
+    fi
+    if ! has_octane; then
+        error "Laravel Octane is not installed"
+        echo "Install with: composer require laravel/octane"
+        return 1
+    fi
+    local php_bin
+    php_bin=$(get_php_binary)
+    if [[ $# -eq 0 ]]; then
+        exec "$php_bin" artisan octane:start
+    else
+        exec "$php_bin" artisan "octane:$1" "${@:2}"
+    fi
 }
 
 main "$@"

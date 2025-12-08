@@ -219,30 +219,71 @@ gum_menu() {
     fi
 }
 
-# Multi-select menu
+# Multi-select menu with fuzzy filter
 gum_multi_menu() {
     local prompt="$1"
     shift
     local options=("$@")
 
     if [[ "$UI_MODE" == "gum" ]]; then
-        printf '%s\n' "${options[@]}" | gum choose \
+        # Get terminal dimensions
+        local term_width term_height
+        term_width=$(tput cols 2>/dev/null || echo 80)
+        term_height=$(tput lines 2>/dev/null || echo 24)
+
+        # Calculate filter height (leave room for header and input)
+        local filter_height=$((term_height - 6))
+        [[ $filter_height -gt 30 ]] && filter_height=30
+        [[ $filter_height -lt 5 ]] && filter_height=5
+
+        # Use full terminal width
+        local filter_width=$((term_width - 2))
+        [[ $filter_width -lt 40 ]] && filter_width=40
+
+        printf '%s\n' "${options[@]}" | gum filter \
             --no-limit \
             --header "$prompt" \
-            --cursor.foreground 212 \
             --header.foreground 99 \
-            --selected.foreground 212
+            --indicator.foreground 212 \
+            --match.foreground 212 \
+            --height "$filter_height" \
+            --width "$filter_width" \
+            --placeholder "Type to filter, Tab to select, Enter to confirm"
     else
-        # Fallback: comma-separated input
+        # Fallback: multi-column display
         echo ""
         echo "${CYAN}${prompt}${RESET}"
         echo ""
 
-        local i=1
+        # Calculate columns based on terminal width
+        local term_width
+        term_width=$(tput cols 2>/dev/null || echo 80)
+
+        # Find max option length
+        local max_len=0
         for opt in "${options[@]}"; do
-            echo "  ${YELLOW}${i})${RESET} $opt"
-            ((i++))
+            [[ ${#opt} -gt $max_len ]] && max_len=${#opt}
         done
+
+        # Column width = number prefix (4) + option + padding (2)
+        local col_width=$((max_len + 6))
+        local num_cols=$((term_width / col_width))
+        [[ $num_cols -lt 1 ]] && num_cols=1
+        [[ $num_cols -gt 4 ]] && num_cols=4
+
+        # Print options in columns
+        local i=1
+        local col=0
+        for opt in "${options[@]}"; do
+            printf "${YELLOW}%3d)${RESET} %-${max_len}s  " "$i" "$opt"
+            ((col++))
+            ((i++))
+            if [[ $col -ge $num_cols ]]; then
+                echo ""
+                col=0
+            fi
+        done
+        [[ $col -ne 0 ]] && echo ""
         echo ""
 
         local choices
@@ -336,4 +377,157 @@ gum_format() {
     else
         echo "$text"
     fi
+}
+
+# ============================================
+# Hotkey Support Functions
+# ============================================
+
+# Read single keypress (non-blocking for special keys)
+ui_read_key() {
+    local key
+    IFS= read -rsn1 key 2>/dev/null
+
+    # Handle escape sequences (arrow keys, function keys)
+    if [[ "$key" == $'\x1b' ]]; then
+        read -rsn2 -t 0.1 key2 2>/dev/null
+        key+="$key2"
+    fi
+
+    echo "$key"
+}
+
+# Menu with numbered hotkeys
+# Usage: hotkey_menu "Header" "opt1" "opt2" ...
+# Returns: selected option text
+hotkey_menu() {
+    local header="$1"
+    shift
+    local options=("$@")
+    local count=${#options[@]}
+
+    echo ""
+    echo "${BOLD}${CYAN}$header${RESET}"
+    echo ""
+
+    local i=1
+    for opt in "${options[@]}"; do
+        if [[ $i -le 9 ]]; then
+            echo "  ${YELLOW}[$i]${RESET} $opt"
+        else
+            local letter
+            letter=$(printf "\\x$(printf '%02x' $((96 + i - 9)))")  # a, b, c...
+            echo "  ${YELLOW}[$letter]${RESET} $opt"
+        fi
+        ((i++))
+    done
+
+    echo ""
+    echo "  ${YELLOW}[0]${RESET} Cancel"
+    echo ""
+    echo "${DIM}Press key to select${RESET}"
+
+    local key
+    key=$(ui_read_key)
+
+    case "$key" in
+        $'\x03'|0|q|Q|\x1b)  # Ctrl-C, 0, q, Escape
+            return 1
+            ;;
+        [1-9])
+            local idx=$((key - 1))
+            if [[ $idx -lt $count ]]; then
+                echo "${options[$idx]}"
+                return 0
+            fi
+            ;;
+        [a-z])
+            local idx=$(($(printf '%d' "'$key") - 97 + 9))
+            if [[ $idx -lt $count ]]; then
+                echo "${options[$idx]}"
+                return 0
+            fi
+            ;;
+    esac
+
+    return 1
+}
+
+# Confirmation with hotkeys
+# Usage: hotkey_confirm "Question?"
+hotkey_confirm_yesno() {
+    local question="$1"
+    local default="${2:-yes}"  # yes or no
+
+    echo ""
+    echo "$question"
+
+    if [[ "$default" == "yes" ]]; then
+        echo "  ${YELLOW}[Y]${RESET} Yes (default)"
+        echo "  ${YELLOW}[n]${RESET} No"
+    else
+        echo "  ${YELLOW}[y]${RESET} Yes"
+        echo "  ${YELLOW}[N]${RESET} No (default)"
+    fi
+    echo ""
+
+    local key
+    key=$(ui_read_key)
+
+    case "$key" in
+        y|Y) return 0 ;;
+        n|N) return 1 ;;
+        "")  # Enter key
+            [[ "$default" == "yes" ]] && return 0 || return 1
+            ;;
+        $'\x03'|\x1b)  # Ctrl-C, Escape
+            return 1
+            ;;
+        *)
+            [[ "$default" == "yes" ]] && return 0 || return 1
+            ;;
+    esac
+}
+
+# Show key hint
+show_key_hint() {
+    local hint="$1"
+    echo "${DIM}$hint${RESET}"
+}
+
+# Wait for any key
+wait_any_key() {
+    local msg="${1:-Press any key to continue...}"
+    echo ""
+    echo "${DIM}$msg${RESET}"
+    read -rsn1
+}
+
+# Pagination helper for long lists
+# Usage: paginate_list items_array page_size current_page
+paginate_show() {
+    local -n items=$1
+    local page_size=${2:-10}
+    local page=${3:-1}
+
+    local total=${#items[@]}
+    local total_pages=$(( (total + page_size - 1) / page_size ))
+    local start=$(( (page - 1) * page_size ))
+    local end=$(( start + page_size ))
+    [[ $end -gt $total ]] && end=$total
+
+    local i=$start
+    local num=1
+    while [[ $i -lt $end ]]; do
+        if [[ $num -le 9 ]]; then
+            echo "  ${YELLOW}[$num]${RESET} ${items[$i]}"
+        else
+            echo "      ${items[$i]}"
+        fi
+        ((i++))
+        ((num++))
+    done
+
+    echo ""
+    echo "${DIM}Page $page/$total_pages | [n]ext [p]rev [q]uit${RESET}"
 }

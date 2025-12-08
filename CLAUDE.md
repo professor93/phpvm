@@ -14,12 +14,18 @@ phpvm/
 │   │   ├── platform.sh      # Distro detection, package manager
 │   │   ├── ui.sh            # Gum TUI with fallbacks
 │   │   ├── version.sh       # Version detection/resolution
+│   │   ├── framework.sh     # Framework detection (Laravel/Symfony/Yii)
 │   │   ├── install.sh       # PHP installation
 │   │   ├── use.sh           # Version switching
 │   │   ├── list.sh          # List command
 │   │   ├── info.sh          # Info command
 │   │   ├── config_edit.sh   # Config viewing/editing
 │   │   ├── fpm.sh           # FPM management
+│   │   ├── worker.sh        # Queue worker management (Supervisor)
+│   │   ├── cron.sh          # Crontab management
+│   │   ├── serve.sh         # Development server
+│   │   ├── menu.sh          # Interactive dashboard menu
+│   │   ├── completion.sh    # Tab completion (bash/zsh)
 │   │   ├── self_update.sh   # Self-update
 │   │   └── help.sh          # Help command
 │   ├── php.sh               # Main entry point
@@ -39,10 +45,23 @@ phpvm/
 - `php list` - List installed versions
 - `php list extensions` - List extensions
 - `php info` - Show info and version resolution
+- `php menu` - Interactive dashboard
 - `php config` - View/edit configuration
 - `php fpm` - Manage PHP-FPM
+- `php serve` - Start dev server (in project)
+- `php worker` - Manage queue workers (in project)
+- `php cron` - Manage cron jobs (in project)
+- `php completion [shell]` - Generate tab completion
 - `php self-update` - Update PHPVM
 - `php help` - Show help
+
+## Framework Commands (in project directory)
+
+- `php artisan [cmd]` - Laravel artisan
+- `php console [cmd]` - Symfony console
+- `php yii [cmd]` - Yii command
+- `php horizon` - Laravel Horizon
+- `php octane [cmd]` - Laravel Octane
 
 ## Version Resolution Order
 

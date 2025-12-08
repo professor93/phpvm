@@ -105,6 +105,32 @@ cmd_install() {
     fi
 }
 
+# Display failed extensions list
+show_failed_extensions() {
+    local version="$1"
+    shift
+    local failed=("$@")
+
+    if [[ ${#failed[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    echo ""
+    warn "The following extensions failed to install:"
+    echo ""
+
+    if [[ "$UI_MODE" == "gum" ]]; then
+        printf '%s\n' "${failed[@]}" | gum format
+    else
+        for ext in "${failed[@]}"; do
+            echo "  - php${version}-${ext}"
+        done
+    fi
+
+    echo ""
+    return 1
+}
+
 # Install new PHP version
 install_new_php_version() {
     local version="$1"
@@ -123,39 +149,59 @@ install_new_php_version() {
         return 1
     fi
 
-    info_log "Installing PHP $version with default extensions..."
+    info_log "Installing PHP $version..."
+    echo ""
 
-    if gum_spin "Installing PHP $version" install_php_package "$version" "${DEFAULT_EXTENSIONS[@]}"; then
-        success "PHP $version installed successfully"
-
-        # Validate installation
-        local php_bin
-        php_bin=$(get_php_binary "$version")
-
-        if [[ -z "$php_bin" || ! -x "$php_bin" ]]; then
-            warn "PHP $version was installed but binary not found at expected location"
-            warn "You may need to configure your PATH or check the installation"
-        else
-            local full_version
-            full_version=$("$php_bin" -r 'echo PHP_VERSION;' 2>/dev/null)
-            success "Verified: PHP $full_version is working"
-        fi
-
-        # Set as default if first installation
-        local installed
-        installed=($(get_installed_versions))
-
-        if [[ ${#installed[@]} -eq 1 ]]; then
-            info_log "Setting PHP $version as default (first installation)"
-            mkdir -p "$PHPVM_DIR"
-            echo "$version" > "$PHPVM_CONFIG"
-        fi
-
-        return 0
-    else
-        error "Failed to install PHP $version"
+    # Install base PHP first
+    msg "Installing PHP $version base package..."
+    if ! install_php_base "$version"; then
+        error "Failed to install PHP $version base package"
         return 1
     fi
+    success "PHP $version base installed"
+
+    # Install default extensions one by one, collect failures
+    local failed_extensions=()
+
+    for ext in "${DEFAULT_EXTENSIONS[@]}"; do
+        msg "Installing php${version}-${ext}..."
+        if ! install_php_extension "$version" "$ext"; then
+            failed_extensions+=("$ext")
+        else
+            success "php${version}-${ext} installed"
+        fi
+    done
+
+    echo ""
+    success "PHP $version installation completed"
+
+    # Show failed extensions if any
+    show_failed_extensions "$version" "${failed_extensions[@]}"
+
+    # Validate installation
+    local php_bin
+    php_bin=$(get_php_binary "$version")
+
+    if [[ -z "$php_bin" || ! -x "$php_bin" ]]; then
+        warn "PHP $version was installed but binary not found at expected location"
+        warn "You may need to configure your PATH or check the installation"
+    else
+        local full_version
+        full_version=$("$php_bin" -r 'echo PHP_VERSION;' 2>/dev/null)
+        success "Verified: PHP $full_version is working"
+    fi
+
+    # Set as default if first installation
+    local installed
+    installed=($(get_installed_versions))
+
+    if [[ ${#installed[@]} -eq 1 ]]; then
+        info_log "Setting PHP $version as default (first installation)"
+        mkdir -p "$PHPVM_DIR"
+        echo "$version" > "$PHPVM_CONFIG"
+    fi
+
+    return 0
 }
 
 # Interactive PHP version selection for installation
@@ -255,108 +301,81 @@ uninstall_php_version() {
 # Install extension for PHP version
 install_extension() {
     local version="$1"
-    local pm=$(get_package_manager)
 
     info_log "Fetching available extensions for PHP $version..."
 
+    # Get available and installed extensions using platform functions
     local available=()
     local installed_ext=()
 
-    case "$pm" in
-        apt)
-            # Get available packages
-            while IFS= read -r line; do
-                local ext_name
-                ext_name=$(echo "$line" | sed "s/php${version}-//" | cut -d' ' -f1)
-                available+=("$ext_name")
-            done < <(apt-cache search "^php${version}-" 2>/dev/null | sort)
+    while IFS= read -r ext; do
+        [[ -n "$ext" ]] && available+=("$ext")
+    done < <(get_available_extensions "$version")
 
-            # Get installed packages
-            while IFS= read -r line; do
-                local ext_name
-                ext_name=$(echo "$line" | sed "s/php${version}-//")
-                installed_ext+=("$ext_name")
-            done < <(dpkg -l "php${version}-*" 2>/dev/null | grep "^ii" | awk '{print $2}' | sed "s/:.*//")
-            ;;
-        dnf|yum)
-            local v_nodot="${version//./}"
-            while IFS= read -r line; do
-                local ext_name
-                ext_name=$(echo "$line" | sed "s/php${v_nodot}-php-//" | sed "s/php${v_nodot}-//" | cut -d'.' -f1)
-                available+=("$ext_name")
-            done < <($pm list available "php${v_nodot}*" 2>/dev/null | grep -v "^Last" | awk '{print $1}' | sort -u)
-
-            while IFS= read -r line; do
-                local ext_name
-                ext_name=$(echo "$line" | sed "s/php${v_nodot}-php-//" | sed "s/php${v_nodot}-//" | cut -d'.' -f1)
-                installed_ext+=("$ext_name")
-            done < <($pm list installed "php${v_nodot}*" 2>/dev/null | grep -v "^Installed" | awk '{print $1}')
-            ;;
-    esac
+    while IFS= read -r ext; do
+        [[ -n "$ext" ]] && installed_ext+=("$ext")
+    done < <(get_installed_extensions "$version")
 
     if [[ ${#available[@]} -eq 0 ]]; then
         error "No extensions found for PHP $version"
         return 1
     fi
 
-    # Build display options
+    # Build display options (only show not installed extensions)
     local options=()
     for ext in "${available[@]}"; do
-        local label="$ext"
+        local is_installed=false
         for inst in "${installed_ext[@]}"; do
             if [[ "$inst" == "$ext" ]]; then
-                label="[INSTALLED] $ext"
+                is_installed=true
                 break
             fi
         done
-        options+=("$label")
+        if [[ "$is_installed" == "false" ]]; then
+            options+=("$ext")
+        fi
     done
 
-    local choice
-    choice=$(gum_menu "Select extension for PHP $version:" "${options[@]}")
+    if [[ ${#options[@]} -eq 0 ]]; then
+        info_log "All available extensions are already installed"
+        return 0
+    fi
 
-    if [[ -z "$choice" ]]; then
+    # Use multiselect menu
+    local selected
+    selected=$(gum_multi_menu "Select extensions to install for PHP $version:" "${options[@]}")
+
+    if [[ -z "$selected" ]]; then
         msg "Cancelled"
         return
     fi
 
-    local ext_name
-    ext_name=$(echo "$choice" | sed 's/\[INSTALLED\] //')
+    echo ""
 
-    if [[ "$choice" == "[INSTALLED]"* ]]; then
-        local action
-        action=$(gum_menu "Extension $ext_name is installed. What would you like to do?" \
-            "Update" \
-            "Uninstall" \
-            "Cancel")
+    # Install selected extensions one by one, collect failures
+    local failed_extensions=()
+    local success_count=0
 
-        case "$action" in
-            "Update")
-                case "$pm" in
-                    apt) gum_spin "Updating $ext_name" run_privileged apt-get upgrade -y "php${version}-${ext_name}" ;;
-                    dnf|yum) gum_spin "Updating $ext_name" run_privileged $pm update -y "php${version//./}-php-${ext_name}" ;;
-                esac
-                success "Extension $ext_name updated"
-                ;;
-            "Uninstall")
-                case "$pm" in
-                    apt) gum_spin "Removing $ext_name" run_privileged apt-get remove -y "php${version}-${ext_name}" ;;
-                    dnf|yum) gum_spin "Removing $ext_name" run_privileged $pm remove -y "php${version//./}-php-${ext_name}" ;;
-                esac
-                success "Extension $ext_name removed"
-                ;;
-            *)
-                msg "Cancelled"
-                ;;
-        esac
-    else
-        info_log "Installing extension $ext_name for PHP $version..."
-        case "$pm" in
-            apt) gum_spin "Installing $ext_name" run_privileged apt-get install -y "php${version}-${ext_name}" ;;
-            dnf|yum) gum_spin "Installing $ext_name" run_privileged $pm install -y "php${version//./}-php-${ext_name}" ;;
-        esac
-        success "Extension $ext_name installed"
+    while IFS= read -r ext_name; do
+        [[ -z "$ext_name" ]] && continue
+        msg "Installing php${version}-${ext_name}..."
+        if install_php_extension "$version" "$ext_name"; then
+            success "php${version}-${ext_name} installed"
+            ((success_count++))
+        else
+            failed_extensions+=("$ext_name")
+        fi
+    done <<< "$selected"
+
+    echo ""
+
+    # Show summary
+    if [[ $success_count -gt 0 ]]; then
+        success "$success_count extension(s) installed successfully"
     fi
+
+    # Show failed extensions if any
+    show_failed_extensions "$version" "${failed_extensions[@]}"
 }
 
 # Check if PHP is installed, prompt to install if not

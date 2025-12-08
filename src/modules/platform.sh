@@ -196,20 +196,15 @@ check_php_available() {
     esac
 }
 
-# Install PHP package
-install_php_package() {
+# Install PHP base package (CLI only, no Apache)
+install_php_base() {
     local version="$1"
-    shift
-    local extensions=("$@")
     local pm=$(get_package_manager)
 
     case "$pm" in
         apt)
-            local packages=("php${version}")
-            for ext in "${extensions[@]}"; do
-                packages+=("php${version}-${ext}")
-            done
-            run_privileged apt-get install -y "${packages[@]}"
+            # Install php-cli directly to avoid pulling in Apache
+            run_privileged apt-get install -y "php${version}-cli"
             ;;
         dnf|yum)
             local v_nodot="${version//./}"
@@ -218,12 +213,56 @@ install_php_package() {
                 run_privileged dnf module reset php -y 2>/dev/null || true
                 run_privileged dnf module enable "php:remi-${version}" -y 2>/dev/null || true
             fi
+            run_privileged $pm install -y "php${v_nodot}-php-cli"
+            ;;
+    esac
+}
 
-            local packages=("php${v_nodot}" "php${v_nodot}-php-cli")
-            for ext in "${extensions[@]}"; do
-                packages+=("php${v_nodot}-php-${ext}")
-            done
-            run_privileged $pm install -y "${packages[@]}"
+# Install single PHP extension
+install_php_extension() {
+    local version="$1"
+    local ext="$2"
+    local pm=$(get_package_manager)
+
+    case "$pm" in
+        apt)
+            run_privileged apt-get install -y "php${version}-${ext}"
+            ;;
+        dnf|yum)
+            local v_nodot="${version//./}"
+            run_privileged $pm install -y "php${v_nodot}-php-${ext}"
+            ;;
+    esac
+}
+
+# Get available extensions for PHP version
+get_available_extensions() {
+    local version="$1"
+    local pm=$(get_package_manager)
+
+    case "$pm" in
+        apt)
+            apt-cache search "^php${version}-" 2>/dev/null | sed "s/php${version}-//" | cut -d' ' -f1 | sort
+            ;;
+        dnf|yum)
+            local v_nodot="${version//./}"
+            $pm list available "php${v_nodot}-php-*" 2>/dev/null | grep -v "^Last" | awk '{print $1}' | sed "s/php${v_nodot}-php-//" | cut -d'.' -f1 | sort -u
+            ;;
+    esac
+}
+
+# Get installed extensions for PHP version
+get_installed_extensions() {
+    local version="$1"
+    local pm=$(get_package_manager)
+
+    case "$pm" in
+        apt)
+            dpkg -l "php${version}-*" 2>/dev/null | grep "^ii" | awk '{print $2}' | sed "s/:.*//; s/php${version}-//"
+            ;;
+        dnf|yum)
+            local v_nodot="${version//./}"
+            $pm list installed "php${v_nodot}-php-*" 2>/dev/null | grep -v "^Installed" | awk '{print $1}' | sed "s/php${v_nodot}-php-//" | cut -d'.' -f1
             ;;
     esac
 }

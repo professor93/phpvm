@@ -74,17 +74,17 @@ fpm_service_control() {
     local current
     current=$(get_current_version)
 
-    # Build service options with status
+    # Build service options with status (no colors in menu labels)
     local options=()
     for v in "${services[@]}"; do
         local service="php${v}-fpm"
         local status
         if systemctl is-active "$service" &>/dev/null; then
-            status="${GREEN}running${RESET}"
+            status="running"
         else
-            status="${RED}stopped${RESET}"
+            status="stopped"
         fi
-        local label="PHP $v FPM ($status)"
+        local label="PHP $v FPM [$status]"
         [[ "$v" == "$current" ]] && label="$label <- current"
         options+=("$label")
     done
@@ -109,27 +109,46 @@ fpm_service_control() {
         "Status")
 
     case "$action" in
-        "Start")   run_privileged systemctl start "$service" && success "Started $service" ;;
-        "Stop")    run_privileged systemctl stop "$service" && success "Stopped $service" ;;
-        "Restart") run_privileged systemctl restart "$service" && success "Restarted $service" ;;
-        "Reload")  run_privileged systemctl reload "$service" && success "Reloaded $service" ;;
-        "Status")  systemctl status "$service" ;;
+        "Start")
+            if gum_confirm "Start $service?"; then
+                run_privileged systemctl start "$service" && success "Started $service"
+            fi
+            ;;
+        "Stop")
+            if gum_confirm "Stop $service?" "no"; then
+                run_privileged systemctl stop "$service" && success "Stopped $service"
+            fi
+            ;;
+        "Restart")
+            if gum_confirm "Restart $service?"; then
+                run_privileged systemctl restart "$service" && success "Restarted $service"
+            fi
+            ;;
+        "Reload")
+            if gum_confirm "Reload $service?"; then
+                run_privileged systemctl reload "$service" && success "Reloaded $service"
+            fi
+            ;;
+        "Status")
+            systemctl status "$service"
+            ;;
     esac
 }
 
 fpm_enable_disable() {
     local services=("$@")
 
+    # Build options (no colors in menu labels)
     local options=()
     for v in "${services[@]}"; do
         local service="php${v}-fpm"
         local status
         if systemctl is-enabled "$service" &>/dev/null; then
-            status="${GREEN}enabled${RESET}"
+            status="enabled"
         else
-            status="${YELLOW}disabled${RESET}"
+            status="disabled"
         fi
-        options+=("PHP $v FPM ($status)")
+        options+=("PHP $v FPM [$status]")
     done
 
     local choice
