@@ -7023,7 +7023,7 @@ main() {
         setup_colors
         detect_distro
         set_ui_mode
-        show_help
+        show_quick_usage
         exit 0
     fi
 
