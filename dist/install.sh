@@ -6,7 +6,7 @@
 
 set -o pipefail
 
-PHPVM_VERSION="__VERSION__"
+PHPVM_VERSION="1.2.6"
 PHPVM_REPO="professor93/phpvm"
 PHPVM_RAW_URL="https://raw.githubusercontent.com/${PHPVM_REPO}/main"
 
