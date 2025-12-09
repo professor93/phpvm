@@ -1,7 +1,7 @@
 #!/bin/bash
 # PHPVM Installer
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/professor93/phpvm/main/install.sh | bash
+#   curl -fsSL https://github.com/professor93/phpvm/releases/latest/download/install.sh | bash
 #   Or run as root for system-wide installation
 
 set -o pipefail
