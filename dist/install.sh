@@ -1,12 +1,12 @@
 #!/bin/bash
 # PHPVM Installer
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/professor93/phpvm/main/install.sh | bash
+#   curl -fsSL https://github.com/professor93/phpvm/releases/latest/download/install.sh | bash
 #   Or run as root for system-wide installation
 
 set -o pipefail
 
-PHPVM_VERSION="dev"
+PHPVM_VERSION="1.2.2-dev"
 PHPVM_REPO="professor93/phpvm"
 PHPVM_RAW_URL="https://raw.githubusercontent.com/${PHPVM_REPO}/main"
 

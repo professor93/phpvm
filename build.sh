@@ -18,7 +18,7 @@ msg()     { echo "${GREEN}->${RESET} $*"; }
 success() { echo "${GREEN}[x]${RESET} $*"; }
 error()   { echo "${RED}x${RESET} $*" >&2; }
 
-# Get version from git tag or use "dev"
+# Get version from git tag, VERSION file, or use "dev"
 get_version() {
     local version
     # Try to get version from git tag (e.g., v1.2.1 -> 1.2.1)
@@ -26,6 +26,12 @@ get_version() {
     if [[ -z "$version" ]]; then
         # Try to get latest tag + commits (e.g., v1.2.0-5-g1234567 -> 1.2.0-dev)
         version=$(git describe --tags 2>/dev/null | sed 's/^v//' | sed 's/-[0-9]*-g.*$/-dev/')
+    fi
+    if [[ -z "$version" ]]; then
+        # Try to read from VERSION file
+        if [[ -f "$SCRIPT_DIR/VERSION" ]]; then
+            version=$(cat "$SCRIPT_DIR/VERSION" | tr -d '[:space:]')
+        fi
     fi
     if [[ -z "$version" ]]; then
         version="dev"

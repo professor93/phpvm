@@ -26,13 +26,13 @@ A shell-based PHP version manager for Linux with interactive TUI using [gum](htt
 
 ```bash
 # User-local install
-curl -fsSL https://raw.githubusercontent.com/professor93/phpvm/main/dist/install.sh | bash
+curl -fsSL https://github.com/professor93/phpvm/releases/latest/download/install.sh | bash
 
 # System-wide install
-curl -fsSL https://raw.githubusercontent.com/professor93/phpvm/main/dist/install.sh | sudo bash
+curl -fsSL https://github.com/professor93/phpvm/releases/latest/download/install.sh | sudo bash
 
 # Uninstall
-curl -fsSL https://raw.githubusercontent.com/professor93/phpvm/main/dist/install.sh | bash -s -- --uninstall
+curl -fsSL https://github.com/professor93/phpvm/releases/latest/download/install.sh | bash -s -- --uninstall
 ```
 
 ## Commands
