@@ -156,8 +156,33 @@ install_gum() {
     local tmp_dir=$(mktemp -d)
     local latest_url="https://api.github.com/repos/charmbracelet/gum/releases/latest"
 
+    local release_json
+    release_json=$(curl -fsSL "$latest_url" 2>/dev/null)
+
+    if [[ -z "$release_json" ]]; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    # Try to find download URL - different naming patterns:
+    # .deb: gum_VERSION_ARCH.deb (e.g., gum_0.17.0_amd64.deb)
+    # .rpm: gum_VERSION_ARCH.rpm
+    # .tar.gz: gum_VERSION_Linux_ARCH.tar.gz
     local download_url
-    download_url=$(curl -fsSL "$latest_url" 2>/dev/null | grep -oE "https://[^\"]+Linux_${arch}\.(tar\.gz|deb|rpm)" | head -1)
+
+    # Detect package manager and prefer native package
+    if command -v apt &>/dev/null; then
+        download_url=$(echo "$release_json" | grep -oE "https://[^\"]+_${arch}\.deb" | head -1)
+    elif command -v dnf &>/dev/null || command -v yum &>/dev/null; then
+        download_url=$(echo "$release_json" | grep -oE "https://[^\"]+_${arch}\.rpm" | head -1)
+    fi
+
+    # Fallback to tar.gz
+    if [[ -z "$download_url" ]]; then
+        local tar_arch="$arch"
+        [[ "$arch" == "amd64" ]] && tar_arch="x86_64"
+        download_url=$(echo "$release_json" | grep -oE "https://[^\"]+Linux_${tar_arch}\.tar\.gz" | head -1)
+    fi
 
     if [[ -z "$download_url" ]]; then
         warn "Could not find gum release for $arch"
