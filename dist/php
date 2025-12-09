@@ -1,5 +1,5 @@
 #!/bin/bash
-# PHP Version Manager (PHPVM) v__VERSION__
+# PHP Version Manager (PHPVM) v1.2.6
 # https://github.com/professor93/phpvm
 # This file is auto-generated. Do not edit directly.
 
@@ -7,7 +7,7 @@ set -o pipefail
 
 # === config.sh ===
 
-PHPVM_VERSION="__VERSION__"
+PHPVM_VERSION="1.2.6"
 PHPVM_REPO="professor93/phpvm"
 PHPVM_GITHUB_API="https://api.github.com/repos/${PHPVM_REPO}/releases/latest"
 PHPVM_RAW_URL="https://raw.githubusercontent.com/${PHPVM_REPO}/main"
@@ -3742,36 +3742,37 @@ show_interactive_menu() {
 
     while true; do
         # Move cursor to start of menu area
+        # Output to /dev/tty since stdout is captured by command substitution
         tput cup 9 0 2>/dev/null || echo -en "\033[9;0H"
 
-        # Print menu with groups
-        echo "  ${DIM}Use ↑↓ arrows or hotkeys, Enter to select${RESET}"
-        echo ""
+        # Print menu with groups (all output to /dev/tty to avoid capture)
+        echo "  ${DIM}Use ↑↓ arrows or hotkeys, Enter to select${RESET}" >/dev/tty
+        echo "" >/dev/tty
 
         # Group 1: Version
-        echo "  ${DIM}┌─ Version ─────────────┐${RESET}"
+        echo "  ${DIM}┌─ Version ─────────────┐${RESET}" >/dev/tty
         for i in 0 1 2; do
-            print_menu_line "$i" "$current" "${items[$i]}"
+            print_menu_line "$i" "$current" "${items[$i]}" >/dev/tty
         done
 
         # Group 2: Configuration
-        echo "  ${DIM}├─ Configuration ───────┤${RESET}"
+        echo "  ${DIM}├─ Configuration ───────┤${RESET}" >/dev/tty
         for i in 3 4 5; do
-            print_menu_line "$i" "$current" "${items[$i]}"
+            print_menu_line "$i" "$current" "${items[$i]}" >/dev/tty
         done
 
         # Group 3: Development
-        echo "  ${DIM}├─ Development ─────────┤${RESET}"
+        echo "  ${DIM}├─ Development ─────────┤${RESET}" >/dev/tty
         for i in 6 7; do
-            print_menu_line "$i" "$current" "${items[$i]}"
+            print_menu_line "$i" "$current" "${items[$i]}" >/dev/tty
         done
 
         # Group 4: Other
-        echo "  ${DIM}├─ Other ───────────────┤${RESET}"
+        echo "  ${DIM}├─ Other ───────────────┤${RESET}" >/dev/tty
         for i in 8 9 10; do
-            print_menu_line "$i" "$current" "${items[$i]}"
+            print_menu_line "$i" "$current" "${items[$i]}" >/dev/tty
         done
-        echo "  ${DIM}└───────────────────────┘${RESET}"
+        echo "  ${DIM}└───────────────────────┘${RESET}" >/dev/tty
 
         # Read single keypress
         local key
